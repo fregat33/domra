@@ -1,0 +1,9 @@
+.idea
+node_modules/
+dist/
+*.tsbuildinfo
+domra.local.json
+.env
+.env.*
+*.db
+*.db-*

@@ -1,0 +1,5 @@
+{
+  "roots": ["C:/src"],
+  "preload": ["my-solution"],
+  "defaultSolution": "my-solution"
+}

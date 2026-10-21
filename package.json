@@ -1,0 +1,21 @@
+{
+  "name": "domra",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Persistent TypeScript code-intelligence daemon for coding agents over MCP",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "start": "node dist/server/index.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "~6.0.3"
+  }
+}
