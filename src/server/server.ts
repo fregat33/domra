@@ -7,18 +7,28 @@ import { DEFAULT_CONFIG } from "../config.ts";
 import { defaultIndexPath, IndexStore } from "../index/index.ts";
 import type { GitProvider } from "../workspace/index.ts";
 import { createGit, indexSolution, isFresh, pathKey, WorkspaceManager } from "../workspace/index.ts";
+import type { ChangeBatch } from "../watcher/debounce.ts";
 import { applyChanges, classifyChange, forgetMissing, PendingRefreshes, RepoWatcher } from "../watcher/index.ts";
 import { checkArguments } from "./arguments.ts";
+import { callerOf, clientOf, countsFound, formatCallLine, formatRejected } from "./callLog.ts";
 import { JobQueue } from "./jobs.ts";
+import { defaultLogDirectory, LogFile } from "./logFile.ts";
 import type { WarmUpState } from "./jobs.ts";
 import { Pager } from "./pager.ts";
 import { preloadSolutions, TOOLS } from "./tools.ts";
 import type { ToolContext } from "./tools.ts";
-import { enqueueIndex, recordHead, statusText } from "./status.ts";
+import { enqueueIndex, pinnedKeys, recordHead, statusText } from "./status.ts";
 import { openView, Slots } from "./view.ts";
 
 /** `git` replaces the git provider built from `gitPath` (tests inject a fake). */
-export type ServerOptions = Partial<DomraConfig> & { warn?: (message: string) => void; git?: GitProvider };
+export type ServerOptions = Partial<DomraConfig> & {
+  warn?: (message: string) => void;
+  git?: GitProvider;
+  /** The clock of "last used" and idle eviction (tests). */
+  now?: () => number;
+  /** Period of the idle eviction timer in ms (default and maximum rate: once a minute). */
+  idleCheckMs?: number;
+};
 
 export type RunningServer = {
   port: number;
@@ -28,6 +38,8 @@ export type RunningServer = {
   jobs: JobQueue;
   watcher: RepoWatcher | null;
   pending: PendingRefreshes | null;
+  /** Whether the idle eviction timer runs (`idleEvictionMinutes` > 0). */
+  evictsIdle: boolean;
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -73,26 +85,82 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-async function callTool(params: unknown, opened: Opened): Promise<unknown> {
-  if (!isObject(params) || typeof params["name"] !== "string") throw new RpcError(-32602, "Invalid params: name is required");
+/** What the call log needs besides the call itself. */
+type CallEnv = {
+  warn: (message: string) => void;
+  caller: string | null;
+  parts: string[];
+  sessionId: string | undefined;
+  clients: Clients;
+};
+
+/** `clientInfo` of `initialize`: by `mcp-session-id` when the request carries one, else the last one seen. */
+type Clients = { bySession: Map<string, string | null>; last: string | null };
+
+async function callTool(params: unknown, opened: Opened, env: CallEnv): Promise<unknown> {
+  const rejectRpc = (tool: string | null, message: string): never => {
+    try {
+      env.warn(tool === null ? `WARN Rejected ? call with arguments []: ${message}` : formatRejected(tool, {}, message));
+    } catch {
+      // a call log failure never fails the call
+    }
+    throw new RpcError(-32602, message);
+  };
+  if (!isObject(params) || typeof params["name"] !== "string") {
+    const raw = isObject(params) ? params["name"] : undefined;
+    return rejectRpc(typeof raw === "string" ? raw : null,"Invalid params: name is required");
+  }
   const name = params["name"];
   const rawArgs = params["arguments"];
-  if (rawArgs !== undefined && !isObject(rawArgs)) throw new RpcError(-32602, "Invalid params: arguments must be an object");
-  const fail = (message: string) => ({ content: [{ type: "text", text: message }], isError: true });
+  if (rawArgs !== undefined && !isObject(rawArgs)) return rejectRpc(name, "Invalid params: arguments must be an object");
+  const started = performance.now();
+  const tool = TOOLS.find((t) => t.name === name);
+  const counted = countsFound(name, tool !== undefined);
+  if (!("error" in opened)) opened.ctx.found = 0;
+  const log = (result: { content: { text: string }[]; isError?: boolean }): void => {
+    try {
+      const client = env.sessionId !== undefined && env.clients.bySession.has(env.sessionId)
+        ? env.clients.bySession.get(env.sessionId)!
+        : env.clients.last;
+      const error = result.isError ? (result.content[0]?.text ?? "") : undefined;
+      env.warn(formatCallLine({
+        tool: name, args: rawArgs, found: counted ? ("error" in opened ? 0 : opened.ctx.found ?? 0) : null, client,
+        caller: env.caller, parts: env.parts, elapsedMs: performance.now() - started, ...(error === undefined ? {} : { error }),
+      }));
+    } catch {
+      // a call log failure never fails the call
+    }
+  };
+  const fail = (message: string) => {
+    const result = { content: [{ type: "text", text: message }], isError: true };
+    log(result);
+    return result;
+  };
   if ("error" in opened) return fail(opened.error);
   const checked = checkArguments(TOOLS, name, rawArgs ?? {});
-  if (!checked.ok) return fail(checked.text);
-  const tool = TOOLS.find((t) => t.name === name)!;
+  if (!checked.ok) {
+    try {
+      env.warn(formatRejected(name, rawArgs ?? {}, checked.text));
+    } catch {
+      // ignored
+    }
+    return fail(checked.text);
+  }
   try {
-    return { content: [{ type: "text", text: await tool.handler(checked.args, opened.ctx) }] };
+    const result = { content: [{ type: "text", text: await tool!.handler(checked.args, opened.ctx) }] };
+    log(result);
+    return result;
   } catch (error) {
     return fail(`domra: ${name} failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
-async function dispatch(method: string, params: unknown, opened: Opened): Promise<unknown> {
+async function dispatch(method: string, params: unknown, opened: Opened, env: CallEnv): Promise<unknown> {
   switch (method) {
     case "initialize": {
+      const client = clientOf(params);
+      if (env.sessionId !== undefined) env.clients.bySession.set(env.sessionId, client);
+      else env.clients.last = client;
       const requested = isObject(params) ? params["protocolVersion"] : undefined;
       const protocolVersion =
         typeof requested === "string" && SUPPORTED_VERSIONS.includes(requested) ? requested : LATEST_VERSION;
@@ -106,17 +174,27 @@ async function dispatch(method: string, params: unknown, opened: Opened): Promis
           name: t.name,
           description: t.description,
           inputSchema: t.inputSchema,
-          annotations: { readOnlyHint: !MUTATING_TOOLS.has(t.name), idempotentHint: t.idempotent },
+          annotations: {
+            readOnlyHint: !MUTATING_TOOLS.has(t.name),
+            destructiveHint: t.name === "forget_solution",
+            idempotentHint: t.idempotent,
+          },
         })),
       };
+    case "prompts/list":
+      return { prompts: [] };
+    case "resources/list":
+      return { resources: [] };
+    case "resources/templates/list":
+      return { resourceTemplates: [] };
     case "tools/call":
-      return callTool(params, opened);
+      return callTool(params, opened, env);
     default:
       throw new RpcError(-32601, "Method not found");
   }
 }
 
-async function handleMessage(body: string, opened: Opened): Promise<Reply> {
+async function handleMessage(body: string, opened: Opened, env: CallEnv): Promise<Reply> {
   let message: unknown;
   try {
     message = JSON.parse(body);
@@ -132,7 +210,7 @@ async function handleMessage(body: string, opened: Opened): Promise<Reply> {
   if (rawId === undefined) return { status: 202, type: "text/plain; charset=utf-8", body: "" };
   const id: JsonRpcId = typeof rawId === "string" || typeof rawId === "number" ? rawId : null;
   try {
-    return json({ jsonrpc: "2.0", id, result: await dispatch(method, message["params"], opened) });
+    return json({ jsonrpc: "2.0", id, result: await dispatch(method, message["params"], opened, env) });
   } catch (error) {
     if (error instanceof RpcError) return rpcFailure(id, error.code, error.message);
     return rpcFailure(id, -32603, error instanceof Error ? error.message : "Internal error");
@@ -185,14 +263,22 @@ export function refusedOrigin(headers: IncomingMessage["headers"], allowedOrigin
   return `Origin not allowed: ${origin}`;
 }
 
-async function route(request: IncomingMessage, ctx: ToolContext, allowedOrigins: readonly string[]): Promise<Reply> {
+async function route(
+  request: IncomingMessage, ctx: ToolContext, allowedOrigins: readonly string[], warn: (message: string) => void, clients: Clients,
+): Promise<Reply> {
   const refused = refusedOrigin(request.headers, allowedOrigins);
   if (refused) return text(403, refused);
   const url = new URL(request.url ?? "/", "http://localhost");
   const opened = (): Opened => openView(ctx, url.searchParams.getAll("part"));
   if (url.pathname === "/mcp") {
     if (request.method !== "POST") return text(405, "Method Not Allowed");
-    return handleMessage(await readBody(request), opened());
+    const header = request.headers["mcp-session-id"];
+    const parts = url.searchParams.getAll("part").filter((p) => p.trim() !== "");
+    const env: CallEnv = {
+      warn, caller: callerOf(url.searchParams.getAll("caller")), parts, clients,
+      sessionId: typeof header === "string" && header !== "" ? header : undefined,
+    };
+    return handleMessage(await readBody(request), opened(), env);
   }
   if (url.pathname === "/health") {
     if (request.method !== "GET") return text(405, "Method Not Allowed");
@@ -205,8 +291,17 @@ async function route(request: IncomingMessage, ctx: ToolContext, allowedOrigins:
 /** Start the MCP server on 127.0.0.1; `port: 0` picks a free port. */
 export async function startServer(options: ServerOptions = {}): Promise<RunningServer> {
   const config = { ...DEFAULT_CONFIG, ...options };
-  const warn = options.warn ?? ((message: string) => void process.stderr.write(`${message}\n`));
+  const stderr = (message: string): void => void process.stderr.write(`${message}\n`);
+  const logFile = options.warn !== undefined && options.logDirectory == null
+    ? null
+    : new LogFile(config.logDirectory ?? defaultLogDirectory(), config.logRetainedDays, stderr);
+  const sink = options.warn ?? stderr;
+  const warn = logFile === null ? sink : (message: string): void => {
+    sink(message);
+    logFile.write(message);
+  };
   const manager = new WorkspaceManager({ roots: config.roots, ignoredFolders: config.ignoredFolders });
+  if (options.now) manager.now = options.now;
   manager.discover();
   const store = IndexStore.open(config.indexPath ?? defaultIndexPath());
   try {
@@ -220,6 +315,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     manager, pager: new Pager(), defaultSolution: config.defaultSolution, store, jobs, warmUp,
     ignoredFolders: config.ignoredFolders, watcher: null, pending: null, changes: { batches: 0, lastBatch: null },
     git: options.git ?? createGit(config.gitPath), heads: new Map(), slots: new Slots(config.gitPath, manager),
+    gitProbe: { started: false, line: null }, pinned: [...config.preload, ...(config.defaultSolution === null ? [] : [config.defaultSolution])],
   };
   let warming = false;
   manager.onLoad = (solution) => {
@@ -242,8 +338,9 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
   preloadSolutions(manager, names, warn);
   if (config.warmUp) {
     warmUp.ran = true;
+    warmUp.failed = [];
     for (const solution of manager.solutions) {
-      const loaded = manager.resolveSolution(solution.path) !== null;
+      const loaded = manager.peekSolution(solution.path) !== null;
       if (loaded || isFresh(store, solution, { ignoredFolders: config.ignoredFolders })) {
         warmUp.fresh++;
         if (!loaded) void jobs.enqueue(`head ${solution.name}`, () => recordHead(ctx, solution));
@@ -253,10 +350,13 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
       void jobs.enqueue(`warm-up ${solution.name}`, async () => {
         warmUp.current = solution.name;
         try {
-          if (!manager.isRegistered(solution.path) || manager.resolveSolution(solution.path) !== null) return;
+          if (!manager.isRegistered(solution.path) || manager.peekSolution(solution.path) !== null) return;
           loadIndexUnload(solution.path);
           await recordHead(ctx, solution);
           warmUp.warmed++;
+        } catch (error) {
+          warmUp.failed!.push(solution.name);
+          throw error;
         } finally {
           warmUp.done++;
           warmUp.current = null;
@@ -270,6 +370,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     const pending = new PendingRefreshes();
     const quietMs = Math.max(100, config.debounceMs);
     const queued = new Set<string>();
+    let pendingOverflow: { batch: ChangeBatch; count: number } | null = null;
     /** Queue a refresh job for an unloaded solution; it records HEAD on every path and re-indexes only a stale index. */
     const enqueueRefresh = (path: string): void => {
       const solution = manager.findRegistered(path);
@@ -283,7 +384,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
       void jobs.enqueue(`refresh ${solution.name}`, async () => {
         queued.delete(key);
         pending.take(solution.path);
-        if (!manager.isRegistered(solution.path) || manager.resolveSolution(solution.path) !== null) return;
+        if (!manager.isRegistered(solution.path) || manager.peekSolution(solution.path) !== null) return;
         if (isFresh(store, solution, { ignoredFolders: config.ignoredFolders })) {
           await recordHead(ctx, solution);
           return;
@@ -296,12 +397,42 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     };
     const watcher = new RepoWatcher({
       roots: config.roots, ignoredFolders: config.ignoredFolders, quietMs, warn,
-      onBatch: (batch) => {
+      onBatch: (incoming) => {
+        // Overflow batches still waiting in the queue merge into one reconcile; the first queued job drains it.
+        if (incoming.overflowed && pendingOverflow) {
+          const target = pendingOverflow.batch;
+          for (const p of incoming.paths) target.paths.add(p);
+          if (incoming.directories?.size) {
+            target.directories ??= new Set();
+            for (const d of incoming.directories) target.directories.add(d);
+          }
+          if (incoming.overflowedGlobally || !incoming.overflowedRoots?.size) target.overflowedGlobally = true;
+          for (const r of incoming.overflowedRoots ?? []) (target.overflowedRoots ??= new Set()).add(r);
+          pendingOverflow.count++;
+          return;
+        }
+        let batch = incoming;
+        let slot: { batch: ChangeBatch; count: number } | null = null;
+        if (incoming.overflowed) {
+          batch = {
+            paths: new Set(incoming.paths), overflowed: true,
+            directories: incoming.directories ? new Set(incoming.directories) : undefined,
+            overflowedRoots: new Set(incoming.overflowedRoots ?? []),
+            overflowedGlobally: incoming.overflowedGlobally || !incoming.overflowedRoots?.size,
+          };
+          slot = pendingOverflow = { batch, count: 1 };
+        }
         void jobs.enqueue("changes", async () => {
-          const report = applyChanges({ manager, store, pending, ignoredFolders: config.ignoredFolders, roots: config.roots, warn }, batch);
-          ctx.changes.batches++;
+          let batchCount = 1;
+          if (slot) {
+            batchCount = slot.count;
+            if (pendingOverflow === slot) pendingOverflow = null;
+          }
+          const report = applyChanges({ manager, store, pending, ignoredFolders: config.ignoredFolders, roots: config.roots, reextractDependents: config.reextractDependents, warn }, batch);
+          ctx.changes.batches += batchCount;
           ctx.changes.lastBatch = { at: new Date(), files: batch.paths.size };
-          if (batch.overflowed || report.discovered.length > 0 || report.forgotten.length > 0) ctx.syncWatch?.();
+          const hasGit = [...batch.paths].some((p) => classifyChange(p, config.ignoredFolders) === "git");
+          if (batch.overflowed || hasGit || (batch.directories?.size ?? 0) > 0 || report.discovered.length > 0 || report.forgotten.length > 0) ctx.syncWatch?.();
           const touched = new Set([...report.reconciled, ...report.reloaded]);
           for (const solution of manager.solutions) {
             if (touched.has(solution.name)) await recordHead(ctx, solution);
@@ -313,7 +444,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
           if (repoKeys.length > 0) {
             for (const solution of manager.solutions) {
               const dir = pathKey(solution.dir);
-              if (manager.resolveSolution(solution.path) !== null) continue;
+              if (manager.peekSolution(solution.path) !== null) continue;
               if (repoKeys.some((root) => dir === root || dir.startsWith(`${root}/`))) enqueueRefresh(solution.path);
             }
           }
@@ -355,8 +486,34 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     sweepTimer.unref();
   }
 
+  let evictionTimer: NodeJS.Timeout | null = null;
+  if (config.idleEvictionMinutes > 0) {
+    const idleMs = config.idleEvictionMinutes * 60_000;
+    const period = Math.max(options.idleCheckMs ?? 60_000, 1);
+    evictionTimer = setInterval(() => {
+      const now = manager.now();
+      const pinned = pinnedKeys(ctx);
+      const idle = manager.loadedSolutions.filter((s) => {
+        const used = manager.lastUsedAt(s.path);
+        return !pinned.has(pathKey(s.path)) && used !== null && now - used >= idleMs;
+      });
+      if (idle.length === 0) return;
+      void jobs.enqueue("idle eviction", () => {
+        const at = manager.now();
+        const pinned = pinnedKeys(ctx);
+        for (const s of manager.loadedSolutions) {
+          const used = manager.lastUsedAt(s.path);
+          if (pinned.has(pathKey(s.path)) || used === null || at - used < idleMs) continue;
+          if (manager.unload(s.path)) warn(`domra: Evicted ${s.name} after ${config.idleEvictionMinutes} idle minutes`);
+        }
+      });
+    }, period);
+    evictionTimer.unref();
+  }
+
+  const clients: Clients = { bySession: new Map(), last: null };
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
-    route(request, ctx, config.allowedOrigins)
+    route(request, ctx, config.allowedOrigins, warn, clients)
       .catch((error: unknown) => rpcFailure(null, -32603, error instanceof Error ? error.message : "Internal error"))
       .then((reply) => {
         response.writeHead(reply.status, { "Content-Type": reply.type, ...(reply.status === 405 ? { Allow: "POST" } : {}) });
@@ -375,7 +532,9 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     jobs,
     watcher: ctx.watcher,
     pending: ctx.pending,
+    evictsIdle: evictionTimer !== null,
     close: async () => {
+      if (evictionTimer) clearInterval(evictionTimer);
       if (refreshTimer) clearInterval(refreshTimer);
       if (sweepTimer) clearInterval(sweepTimer);
       ctx.watcher?.close();
@@ -385,6 +544,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
       });
       await jobs.idle();
       store.close();
+      logFile?.close();
     },
   };
 }

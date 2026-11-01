@@ -1,5 +1,9 @@
 {
   "roots": ["C:/src"],
   "preload": ["my-solution"],
-  "defaultSolution": "my-solution"
+  "defaultSolution": "my-solution",
+  "logDirectory": null,
+  "logRetainedDays": 7,
+  "reextractDependents": true,
+  "idleEvictionMinutes": 0
 }

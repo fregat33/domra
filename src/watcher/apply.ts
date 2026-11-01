@@ -4,7 +4,8 @@ import type { IndexStore } from "../index/index.ts";
 import type { DiscoveredSolution, LoadedProject, LoadedSolution, WorkspaceManager } from "../workspace/index.ts";
 import {
   addRootFile, adoptRootFile, clearPackageCache, describeSolution, discoverSolutions, indexDocuments, indexSolution, MAX_DISCOVERY_DEPTH, normalizePath,
-  pathKey, projectFileList, projectFilesChanged, readReferences, removeDocument, removeRootFile,
+  packageNameOf, pathKey, projectFileList, projectFilesChanged, readReferences, reextractProjects, referencingProjects, removeDocument, removeRootFile,
+  withTransitiveDependents,
 } from "../workspace/index.ts";
 import { classifyChange } from "./classifier.ts";
 import type { ChangeBatch } from "./debounce.ts";
@@ -17,6 +18,8 @@ export type ApplyContext = {
   ignoredFolders: readonly string[];
   /** Configured roots; without them new tsconfigs are not registered. */
   roots?: readonly string[];
+  /** Re-extract dependent projects after a declared-surface change; on unless false. */
+  reextractDependents?: boolean;
   warn: (message: string) => void;
   now?: () => number;
 };
@@ -29,6 +32,8 @@ export type ApplyReport = {
   reconciled: string[];
   pendingTouched: string[];
   extracted: number;
+  /** Documents re-extracted because the declared surface of a project they depend on changed. */
+  reextracted: number;
   /** tsconfig paths registered because they appeared. */
   discovered: string[];
   /** Names of the solutions forgotten because their tsconfig vanished. */
@@ -77,11 +82,17 @@ function solutionFor(manager: WorkspaceManager, path: string): DiscoveredSolutio
   return best;
 }
 
-/** Forget a solution (unload, unregister, drop pending refreshes and index rows); null when the hint matches nothing. */
+/**
+ * Forget a solution (unload, unregister, drop pending refreshes and index rows); null when the hint matches nothing.
+ * A hint naming 2+ solutions forgets nothing and returns them as `ambiguous`.
+ */
 export function forgetSolution(
   manager: WorkspaceManager, store: IndexStore, pending: PendingRefreshes | null, hint: string,
-): { solution: DiscoveredSolution; projectsRemoved: number } | null {
-  const solution = manager.forget(hint);
+): { solution: DiscoveredSolution; projectsRemoved: number } | { ambiguous: DiscoveredSolution[] } | null {
+  const candidates = manager.resolveForForget(hint);
+  if (candidates.length === 0) return null;
+  if (candidates.length > 1) return { ambiguous: candidates };
+  const solution = manager.forget(candidates[0]!.path);
   if (!solution) return null;
   pending?.take(solution.path);
   return { solution, projectsRemoved: store.deleteSolution(solution.path) };
@@ -95,7 +106,7 @@ export function forgetMissing(
   for (const solution of manager.solutions) {
     if (existsSync(solution.path)) continue;
     const forgotten = forgetSolution(manager, store, pending, solution.path);
-    if (!forgotten) continue;
+    if (!forgotten || "ambiguous" in forgotten) continue;
     names.push(solution.name);
     warn(`domra: forgot ${solution.name} (${solution.path}): tsconfig is gone, ${forgotten.projectsRemoved} projects removed from the index`);
   }
@@ -241,7 +252,7 @@ function statOf(path: string): { mtime: number; size: number } | null {
 }
 
 /** Compare every indexed file of the solution by mtime+size, then pick up files newly listed by the tsconfigs. */
-function reconcileSolution(ctx: ApplyContext, solution: LoadedSolution): { delta: Delta; extracted: number } {
+function reconcileSolution(ctx: ApplyContext, solution: LoadedSolution): { delta: Delta; extracted: number; changedProjects: string[] } {
   const started = performance.now();
   const delta: Delta = { applied: 0, removed: 0, added: 0, changed: [] };
   const seen = new Set<string>();
@@ -268,12 +279,89 @@ function reconcileSolution(ctx: ApplyContext, solution: LoadedSolution): { delta
       delta.changed.push(file);
     }
   }
-  const extracted = indexDocuments(ctx.store, solution, delta.changed).documentsExtracted;
+  const { documentsExtracted: extracted, changedProjects } = indexDocuments(ctx.store, solution, delta.changed);
   const ms = Math.round(performance.now() - started);
   ctx.warn(
     `domra: Reconciled ${solution.name}: ${delta.applied} updated, ${delta.added} added, ${delta.removed} removed, ${extracted} extracted in ${ms}ms`,
   );
-  return { delta, extracted };
+  return { delta, extracted, changedProjects };
+}
+
+/** Projects whose declared surface changed in one loaded solution during a batch, with the paths that changed. */
+type SurfaceChange = { solution: LoadedSolution; projects: Set<string>; paths: Set<string> };
+
+function recordSurface(changes: Map<string, SurfaceChange>, solution: LoadedSolution, projects: readonly string[], paths: readonly string[]): void {
+  if (projects.length === 0) return;
+  const key = pathKey(solution.path);
+  let entry = changes.get(key);
+  if (!entry) {
+    entry = { solution, projects: new Set(), paths: new Set() };
+    changes.set(key, entry);
+  }
+  for (const project of projects) entry.projects.add(project);
+  for (const path of paths) entry.paths.add(path);
+}
+
+/** Hand the changed files to the projects of another solution that see them, so their programs match the disk. */
+function syncPaths(ctx: ApplyContext, solution: LoadedSolution, paths: ReadonlySet<string>): void {
+  for (const path of paths) {
+    const owners = ownersOf(solution, path);
+    if (owners.length === 0) continue;
+    const text = readText(path, ctx.warn);
+    if (typeof text === "string") pushHost(owners, path, text);
+  }
+}
+
+/**
+ * After a batch changed the declared surface of projects, rewrite the stored extractions of the projects
+ * that depend on them (the origin solution: the changed projects plus their transitive dependents; other
+ * loaded solutions: projects consuming a changed project by package name or the same tsconfig, plus
+ * their transitive dependents). Each project is re-extracted once per batch. Origins in `reloaded`
+ * were fully re-indexed already. Returns the number of documents re-extracted.
+ */
+function propagateSurfaceChanges(ctx: ApplyContext, changes: Map<string, SurfaceChange>, reloaded: ReadonlySet<string>): number {
+  if (ctx.reextractDependents === false || changes.size === 0) return 0;
+  const targets = new Map<string, { solution: LoadedSolution; names: Set<string> }>();
+  const addTargets = (solution: LoadedSolution, names: readonly string[]): void => {
+    const key = pathKey(solution.path);
+    const entry = targets.get(key) ?? { solution, names: new Set<string>() };
+    for (const name of names) entry.names.add(name);
+    targets.set(key, entry);
+  };
+  for (const [key, change] of changes) {
+    if (!reloaded.has(key)) addTargets(change.solution, withTransitiveDependents(change.solution, change.projects));
+  }
+  for (const other of ctx.manager.loadedSolutions) {
+    const key = pathKey(other.path);
+    const packages = new Set<string>();
+    const tsconfigs = new Set<string>();
+    const paths = new Set<string>();
+    for (const [originKey, change] of changes) {
+      if (originKey === key) continue;
+      for (const project of change.solution.projects) {
+        if (!change.projects.has(project.name)) continue;
+        tsconfigs.add(project.tsconfig);
+        const name = packageNameOf(project.dir);
+        if (name) packages.add(name);
+      }
+      for (const path of change.paths) paths.add(path);
+    }
+    if (tsconfigs.size === 0) continue;
+    const seeds = referencingProjects(other, packages, tsconfigs);
+    if (seeds.length === 0) continue;
+    syncPaths(ctx, other, paths);
+    addTargets(other, withTransitiveDependents(other, seeds));
+  }
+  let total = 0;
+  for (const { solution, names } of targets.values()) {
+    const started = performance.now();
+    const result = reextractProjects(ctx.store, solution, [...names], { now: ctx.now });
+    total += result.documents;
+    ctx.warn(
+      `domra: Re-extracted ${result.documents} documents of ${result.projects} dependent projects in ${solution.name} in ${Math.round(performance.now() - started)}ms`,
+    );
+  }
+  return total;
 }
 
 /**
@@ -283,8 +371,9 @@ function reconcileSolution(ctx: ApplyContext, solution: LoadedSolution): { delta
 export function applyChanges(ctx: ApplyContext, batch: ChangeBatch): ApplyReport {
   const now = ctx.now ?? Date.now;
   const report: ApplyReport = {
-    applied: 0, removed: 0, added: 0, reloaded: [], reconciled: [], pendingTouched: [], extracted: 0, discovered: [], forgotten: [],
+    applied: 0, removed: 0, added: 0, reloaded: [], reconciled: [], pendingTouched: [], extracted: 0, reextracted: 0, discovered: [], forgotten: [],
   };
+  const surface = new Map<string, SurfaceChange>();
   report.forgotten = forgetMissing(ctx.manager, ctx.store, ctx.pending, ctx.warn);
   const loadedKeys = new Set(ctx.manager.loadedSolutions.map((s) => pathKey(s.path)));
   const touch = (solution: DiscoveredSolution, file: string): void => {
@@ -292,19 +381,37 @@ export function applyChanges(ctx: ApplyContext, batch: ChangeBatch): ApplyReport
     if (!report.pendingTouched.includes(solution.path)) report.pendingTouched.push(solution.path);
   };
   const appeared = new Set<string>();
-  const touchUnloaded = (): void => {
+  const touchUnloaded = (inScope: (solution: DiscoveredSolution) => boolean): void => {
     for (const solution of ctx.manager.solutions) {
       const key = pathKey(solution.path);
-      if (!loadedKeys.has(key) && !appeared.has(key)) touch(solution, solution.path);
+      if (!loadedKeys.has(key) && !appeared.has(key) && inScope(solution)) touch(solution, solution.path);
     }
   };
 
-  const kinds = [...batch.paths].map((path) => ({ path, kind: classifyChange(path, ctx.ignoredFolders) }));
+  const allKinds = [...batch.paths].map((path) => ({ path, kind: classifyChange(path, ctx.ignoredFolders) }));
+  const hasGit = allKinds.some((k) => k.kind === "git");
+  const scopedRoots =
+    batch.overflowed && !batch.overflowedGlobally && !hasGit && batch.overflowedRoots && batch.overflowedRoots.size > 0
+      ? [...batch.overflowedRoots]
+      : null;
+  const scopedKeys = (scopedRoots ?? []).map(pathKey);
+  const underRoots = (path: string): boolean => {
+    const key = pathKey(path);
+    return scopedKeys.some((root) => key === root || key.startsWith(`${root}/`));
+  };
+  const globalOverflow = batch.overflowed && !scopedRoots;
+  // Paths inside a scoped overflow root are covered by its reconcile.
+  const kinds = scopedRoots ? allKinds.filter((k) => !underRoots(k.path)) : allKinds;
+  const directories = scopedRoots && batch.directories ? new Set([...batch.directories].filter((d) => !underRoots(d))) : batch.directories;
   if (batch.overflowed || kinds.some((k) => k.kind === "git" || k.kind === "project")) clearPackageCache();
 
   const found: string[] = [];
-  if (batch.overflowed && ctx.roots) found.push(...registerScanned(ctx, discoverSolutions(ctx.roots, ctx.ignoredFolders)));
-  if (batch.directories) found.push(...scanDirectories(ctx, batch.directories));
+  if (globalOverflow && ctx.roots) found.push(...registerScanned(ctx, discoverSolutions(ctx.roots, ctx.ignoredFolders)));
+  if (scopedRoots) {
+    for (const root of scopedRoots) ctx.warn(`domra: File watcher overflow under ${root}; scheduling reconcile of that root`);
+    found.push(...registerScanned(ctx, discoverSolutions(scopedRoots, ctx.ignoredFolders)));
+  }
+  if (directories) found.push(...scanDirectories(ctx, directories));
   for (const { path, kind } of kinds) {
     if (kind === "project" && registerAppeared(ctx, path)) found.push(normalizePath(path));
   }
@@ -313,11 +420,18 @@ export function applyChanges(ctx: ApplyContext, batch: ChangeBatch): ApplyReport
     report.discovered.push(normalizePath(path));
   }
 
-  if (batch.overflowed || kinds.some((k) => k.kind === "git")) {
-    const loaded = ctx.manager.loadedSolutions;
-    ctx.warn(`domra: Git HEAD changed; reconciling ${loaded.length} loaded solutions`);
+  const reloadedKeys = new Set<string>();
+  if (globalOverflow || hasGit || scopedRoots) {
+    const inScope = (solution: { dir: string }): boolean => !scopedRoots || underRoots(solution.dir);
+    const loaded = ctx.manager.loadedSolutions.filter(inScope);
+    ctx.warn(
+      scopedRoots
+        ? `domra: Reconciling ${loaded.length} loaded solutions under overflowed roots`
+        : `domra: Git HEAD changed; reconciling ${loaded.length} loaded solutions`,
+    );
     for (const solution of loaded) {
-      const { delta, extracted } = reconcileSolution(ctx, solution);
+      const { delta, extracted, changedProjects } = reconcileSolution(ctx, solution);
+      recordSurface(surface, solution, changedProjects, delta.changed);
       report.applied += delta.applied;
       report.removed += delta.removed;
       report.added += delta.added;
@@ -330,13 +444,16 @@ export function applyChanges(ctx: ApplyContext, batch: ChangeBatch): ApplyReport
       const reloaded = ctx.manager.reload(solution.path);
       indexSolution(ctx.store, reloaded, { ignoredFolders: ctx.ignoredFolders });
       report.reloaded.push(reloaded.name);
+      reloadedKeys.add(pathKey(solution.path));
       ctx.warn(`domra: ${reloaded.name}: project file changed, reloaded in ${Math.round(performance.now() - started)}ms`);
     }
-    touchUnloaded();
-    return report;
+    touchUnloaded(inScope);
+    if (!scopedRoots) {
+      report.reextracted += propagateSurfaceChanges(ctx, surface, reloadedKeys);
+      return report;
+    }
   }
 
-  const reloadedKeys = new Set<string>();
   for (const { path, kind } of kinds) {
     if (kind !== "project" || appeared.has(pathKey(path))) continue;
     const solution = solutionFor(ctx.manager, path);
@@ -366,7 +483,7 @@ export function applyChanges(ctx: ApplyContext, batch: ChangeBatch): ApplyReport
       continue;
     }
     if (reloadedKeys.has(key)) continue;
-    const solution = ctx.manager.resolveSolution(discovered.path);
+    const solution = ctx.manager.peekSolution(discovered.path);
     if (!solution) continue;
     let entry = deltas.get(key);
     if (!entry) {
@@ -376,7 +493,8 @@ export function applyChanges(ctx: ApplyContext, batch: ChangeBatch): ApplyReport
     applySource(ctx, solution, path, entry.delta);
   }
   for (const { solution, delta } of deltas.values()) {
-    const extracted = indexDocuments(ctx.store, solution, delta.changed).documentsExtracted;
+    const { documentsExtracted: extracted, changedProjects } = indexDocuments(ctx.store, solution, delta.changed);
+    recordSurface(surface, solution, changedProjects, delta.changed);
     report.applied += delta.applied;
     report.removed += delta.removed;
     report.added += delta.added;
@@ -384,5 +502,6 @@ export function applyChanges(ctx: ApplyContext, batch: ChangeBatch): ApplyReport
     const total = delta.applied + delta.removed + delta.added;
     if (total > 0) ctx.warn(`domra: ${solution.name}: applied ${total} file changes, ${extracted} documents re-extracted`);
   }
+  report.reextracted += propagateSurfaceChanges(ctx, surface, reloadedKeys);
   return report;
 }

@@ -15,7 +15,10 @@ The workspace manager discovers solutions under `roots` (honouring `ignoredFolde
 | `initialize` | `{ protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "domra", version } }`; the client's `protocolVersion` is echoed when it is `2024-11-05`, `2025-03-26` or `2025-06-18`, else `2025-06-18` |
 | `notifications/*` (no `id`) | HTTP 202, empty body |
 | `ping` | `{}` |
-| `tools/list` | the seventeen tools (name, description, `inputSchema`, `annotations: { readOnlyHint, idempotentHint }`; `readOnlyHint` is `false` for `load_solution`, `reindex` and `forget_solution`, else `true`) |
+| `tools/list` | the seventeen tools (name, description, `inputSchema`, `annotations: { readOnlyHint, destructiveHint, idempotentHint }`; `readOnlyHint` is `false` for `load_solution`, `reindex` and `forget_solution`, else `true`; `destructiveHint` is `true` for `forget_solution` only; `idempotentHint` is `false` for `next_page` only) |
+| `prompts/list` | `{ prompts: [] }` (a capability probe; `capabilities` still declares `tools` only) |
+| `resources/list` | `{ resources: [] }` |
+| `resources/templates/list` | `{ resourceTemplates: [] }` |
 | `tools/call` | `{ content: [{ type: "text", text }], isError? }` |
 
 Errors: `-32700` invalid JSON, `-32600` batch or missing `jsonrpc`/`method`, `-32601` unknown method, `-32602` bad `tools/call` params. A tool that throws yields `isError: true` with `domra: {tool} failed: {message}` (HTTP 200).
@@ -32,10 +35,10 @@ Other routes: `GET /health` → 200 `text/plain` with the `status` tool text; `G
 
 | Tool | Arguments | Result |
 | --- | --- | --- |
-| `status` | none | `Process:`, `Index:` (path and counts), `Jobs:`, `Watcher: {R} roots, {B} batches applied[, last batch HH:MM:SS {F} files], {M} buffered` (or `Watcher: off`; `{M}` = paths held in the debouncer), `Unloaded refresh: ...` (only with the watcher), `Ready: yes` when no job is pending or running and nothing is buffered, else `Ready: no ({N} jobs, {M} buffered)`, `Warm-up:` and the load state of every known solution, each line ending in `HEAD {7 chars}` (`HEAD -` when none recorded) (same text on `/health`) |
+| `status` | none | `Process:`, `Index:` (path and counts), `Jobs:`, `Watcher: {R} roots, {B} batches applied[, last batch HH:MM:SS {F} files], {M} buffered` (or `Watcher: off`; `{M}` = paths held in the debouncer), `Unloaded refresh: ...` (only with the watcher), `Ready: yes` when no job is pending or running and nothing is buffered, else `Ready: no ({N} jobs, {M} buffered)`, `Git: git version x.y.z` (or `Git: not found ({error})`, or `Git: not probed yet`; the first `status` starts the one-time probe in the background, later calls print its result; one line), `Warm-up: done, {N} warmed, {M} already fresh[, {K} failed ({names})]` (the failure part only when K > 0; a warm-up job that throws counts as failed) and one row per known solution: `  {name}  loaded[ pinned]  {n} projects, {n} source files, loaded in {x}s, last used HH:mm:ss  head {7 chars}  {path}` or `  {name}  registered  head {7 chars}  {path}[  error: {first line}]` (`head -` when no head is recorded; `pinned` = matches `preload` or `defaultSolution`; `error:` = the last load of that solution failed) (same text on `/health`) |
 | `load_solution` | `solution` | `{name}: {N} projects loaded in {X.X}s, {M} unresolved imports.` or `Unknown solution: {x}. Known: ...`; indexing is queued |
 | `forget_solution` | `solution` (full tsconfig path or name) | `Forgot {name} ({path}): {N} projects removed from the index.` or `Unknown solution: {x}. Known: ...`; unloads, unregisters and deletes the solution's index rows. It stays forgotten until `load_solution` with its tsconfig path, a query tool called with the full path of an existing tsconfig (explicit intent registers it again), a create/change event of its `tsconfig.json`, an overflow re-discovery, or a restart. A hint naming a non-existing `.json` path never registers anything: the tool answers `Unknown solution: ...`. Listed last in `tools/list` |
-| `reindex` | `solution` (name or `all`), `force?` (false) | `Queued reindex of {N} loaded solutions (force=...).`, `Queued reindex of {name} (force=...).`, `{name} was not loaded; load started, indexing follows automatically.` or `Unknown solution: {x}. Known: ...` |
+| `reindex` | `solution?` (name or `all`, case-insensitive and trimmed; blank or absent = `defaultSolution`, and with none configured the unknown-solution text `Unknown solution: . Known: ...`), `force?` (false) | `Queued reindex of {N} loaded solutions (force=...).`, `Queued reindex of {name} (force=...).`, `{name} was not loaded; load started, indexing follows automatically.` or `Unknown solution: {x}. Known: ...` |
 | `package_drift` | `limit?` (50, consumer lines per package) | per package (by name) `{package}  source {version} ({source solution dir})`, then `  {consumer solution dir}  {consumer project}  {consumed version}` lines (at most `limit`, then `  ... {K} more`), then `Total: {N} consumer projects on a version other than the source. Only solutions indexed at least once are compared.`; without drift `No package version drift: every indexed consumer uses the version its source package currently declares. Only solutions indexed at least once are compared.`; paged (label `package_drift`) |
 | `next_page` | `cursor`, `limit?` | the next page of a paged result |
 | `search_symbols` | `pattern`, `kind?`, `limit?` (30) | `Live {solution} ({total}):` and one hit line per symbol, paged |
@@ -102,6 +105,8 @@ Visibility of one request:
 
 The view applies to every tool and every index fallback: live selection, `solution` hints (path, name, substring), absolute-path lookup, cross-solution twins, `search_symbols`, `find_references`, `find_implementations`, `find_derived_types`, `get_call_graph`, `get_outline` (including the index outline), `get_diagnostics`, `review_changes`, `package_drift` (consumers and sources), `status` and `/health` (the solution rows, the `Index:` counts and the `Unloaded refresh:` line follow the view; `Process:`, `Jobs:`, `Watcher:`, `Ready:` and `Warm-up:` stay global; a request without `part` is a view too, so its counts leave out private slots), `load_solution` (an explicit tsconfig path the view may not see is refused with `Unknown solution` and is not registered; a path outside every root and every worktree is visible to everyone), `reindex` and `forget_solution`. A hidden solution named by hint answers `Unknown solution: {x}. Known: ...` (the list shows visible solutions only); an absolute file path inside a hidden solution is not under any visible solution (`No symbol at ...` / `File not found` as for any unknown path). `next_page` cursors are global. Without a `solution` hint in a view with parts, the solutions of the parts are loaded on demand and tried first, then the other visible loaded solutions. The view is built per request; concurrent requests do not share it.
 
+Solution hints match an exact name case-insensitively (after the exact path, before a name fragment; the first fragment match wins for every tool except `forget_solution`). `forget_solution` never forgets a solution the caller did not clearly name: the hint is trimmed (a blank hint answers `Unknown solution`), only visible solutions are candidates, and the candidates are the exact path, else every exact name (case-insensitive), else every name containing the hint. With 2+ candidates nothing is unloaded, unregistered or deleted and the answer is `Ambiguous solution: {hint} matches {Name} ({path}), {Name} ({path}). Use the full path or the exact name.` (candidates sorted by path; `Use the full path.` when every candidate's name equals the hint).
+
 Errors (tool-call result text, `isError: true`):
 
 | Case | Text |
@@ -122,6 +127,33 @@ With the first URL an agent sees the `shop` slot 1 and the base checkouts of eve
 ## Pager
 
 `src/server/pager.ts`. In memory, capacity 128 results, TTL 30 minutes; on store, expired entries are evicted first, then the oldest. A cursor is 10 lowercase hex characters. `appendPage(lines, limit, label)` prints the first `max(1, limit)` lines and, when lines remain, `  ... N more (next_page cursor=...)`. `next_page` prints `Continued: {label}` and the following page (a new cursor when more remain; the old cursor stays valid). An unknown or expired cursor answers `Unknown or expired cursor. Cursors live in memory for 30 minutes; re-run the original query.` The clock and random source are injectable for tests.
+
+## Call log
+
+`src/server/callLog.ts`. Every `tools/call` (also of an unknown tool) writes one line through the `warn` logger, without the `domra: ` prefix:
+
+```
+INFO search_symbols pattern="UpgradeCase" limit=20 found=18 client="claude-code 2.1.311" caller="worker/sonnet/t1" part=- 3ms
+```
+
+- Tool name, then the arguments as `name=value` in the order received; with no arguments `found=` follows the name after one space.
+- Values: strings quoted and cut to 120 characters; numbers and booleans raw; `null`; arrays and objects as JSON text cut to 120, not quoted. A cut appends `…` after the limit; values are cut first, escaped after. Quoting escapes `\`, `"`, CR and LF (`\\`, `\"`, `\r`, `\n`), so a line is always one line. Keys of `[A-Za-z0-9_]{1,120}` are written as is, any other key (also empty) is cut and quoted like a value.
+- `found`: lines given to the pager over the call (`0` for an empty result); for `review_changes` the number of changed declarations (the `Total:` footer). `-` for `go_to_definition`, `get_symbol_info`, `next_page`, `status`, `reindex`, `load_solution`, `forget_solution` and unknown tools.
+- `client`: `"name version"` from the `clientInfo` of `initialize`, `-` when absent or the name is blank. The server is stateless per request, so it keeps the clientInfo in a map keyed by the `mcp-session-id` header when a request carries one, else a single last-seen value set by every `initialize`. Domra issues no session ids today, so the last-seen value is the normal path (with several clients the value is that of the latest `initialize`).
+- `caller`: the first `?caller=` query value, trimmed, cut to 100 characters, quoted; `-` when absent or blank. It changes no result.
+- `part`: the `part` query values joined by `;`, quoted; `-` when none.
+- The last field is the elapsed time as `Nms`.
+
+A normal line starts with `INFO `. A call whose result has `isError` starts with `WARN ` and ends with ` error=<first line of the text, cut to 199 characters, not quoted>`. A call rejected by the argument filter also writes `WARN Rejected {tool} call with arguments [{keys}]: {problem}` before that line (keys formatted as above, newlines in the problem replaced by spaces). A failure of the log itself never fails the call; tool results are not changed.
+
+## Log file
+
+`src/server/logFile.ts`. Everything that goes through `warn` (server, watcher, job and call-log output) is also appended to a daily JSON-lines file `{logDirectory}/domra-YYYYMMDD.clef` (local date; default directory `${LOCALAPPDATA ?? homedir}/domra/logs`). Stderr output is unchanged, `INFO `/`WARN ` prefixes included.
+
+- One object per line: `@t` (ISO 8601 UTC), `@l` (`Warning` for a `WARN ` prefix, omitted otherwise, as CLEF omits Information), `@m` (the message without the `INFO `/`WARN ` prefix).
+- Appends are synchronous (`appendFileSync`), so several processes can share a file and nothing is lost on a crash. A write failure warns once on stderr and never throws.
+- At startup and at every date change, `domra-YYYYMMDD.clef` files beyond the newest `logRetainedDays` are deleted (`<= 0` keeps all). Other files are never touched.
+- When `startServer` gets its own `warn` (tests, embedders), no file is written unless `logDirectory` is set in the options.
 
 ## Helper script
 

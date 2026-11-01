@@ -83,15 +83,28 @@ test("tools/list returns the seventeen tools in order", async () => {
   );
   const required = Object.fromEntries(tools.map((t: any) => [t.name, t.inputSchema.required]));
   assert.deepEqual(required, {
-    status: [], load_solution: ["solution"], forget_solution: ["solution"], reindex: ["solution"], package_drift: [], next_page: ["cursor"], search_symbols: ["pattern"],
+    status: [], load_solution: ["solution"], forget_solution: ["solution"], reindex: [], package_drift: [], next_page: ["cursor"], search_symbols: ["pattern"],
     go_to_definition: ["symbol"], get_symbol_info: ["symbol"], list_members: ["type"], get_outline: ["target"],
     find_references: ["symbol"], find_implementations: ["symbol"], find_derived_types: ["type"],
     get_call_graph: ["symbol"], review_changes: [], get_diagnostics: ["target"],
   });
   for (const t of tools) {
     assert.equal(t.inputSchema.type, "object");
-    assert.equal(t.annotations.readOnlyHint, !["forget_solution", "load_solution", "reindex"].includes(t.name));
+    assert.equal(t.annotations.readOnlyHint, !["forget_solution", "load_solution", "reindex"].includes(t.name), t.name);
+    assert.equal(t.annotations.destructiveHint, t.name === "forget_solution", t.name);
+    assert.equal(t.annotations.idempotentHint, t.name !== "next_page", t.name);
   }
+  assert.equal(tools.length, 17);
+});
+
+test("prompts, resources and templates probes answer empty lists; other unknown methods stay -32601", async () => {
+  assert.deepEqual((await rpc("prompts/list")).result, { prompts: [] });
+  assert.deepEqual((await rpc("resources/list")).result, { resources: [] });
+  assert.deepEqual((await rpc("resources/templates/list")).result, { resourceTemplates: [] });
+  assert.equal((await rpc("resources/read")).error?.code, -32601);
+  assert.equal((await rpc("prompts/get")).error?.code, -32601);
+  const init = await rpc("initialize", { protocolVersion: "2025-06-18" });
+  assert.deepEqual(Object.keys(init.result.capabilities), ["tools"]);
 });
 
 test("search_symbols and paging", async () => {
@@ -214,7 +227,8 @@ test("status, health and load_solution", async () => {
   assert.match(status.text, /^ {2}\d+ projects, \d+ tracked files, \d+ blobs, \d+ symbols, \d+ references, \d+ relations$/m);
   assert.ok(status.text.includes("Jobs: 0 pending"), status.text);
   assert.ok(status.text.includes("Warm-up: done, "), status.text);
-  assert.ok(/^ {2}demo {2}loaded {2}/m.test(status.text), status.text);
+  assert.ok(/^ {2}demo {2}loaded pinned {2}\d+ projects, \d+ source files, loaded in \d+\.\ds, last used \d\d:\d\d:\d\d {2}head \S+ {2}/m.test(status.text), status.text);
+  assert.match(status.text, /^Git: (git version .+|not found \(.+\)|not probed yet)$/m);
   const health = await fetch(`http://127.0.0.1:${server.port}/health`);
   assert.equal(health.status, 200);
   assert.match(health.headers.get("content-type") ?? "", /^text\/plain/);
