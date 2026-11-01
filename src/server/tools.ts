@@ -43,7 +43,15 @@ export type ToolContext = {
   slots: Slots;
   /** Set on the per-request context: the parts of the request URL. */
   view?: View;
+  /** Set on the per-request context: lines given to the pager over the call (the call log's `found`). */
+  found?: number;
 };
+
+/** A page of `lines` through the shared pager, counted in the per-call `found`. */
+function page(ctx: ToolContext, lines: string[], limit: number, label: string): string {
+  ctx.found = (ctx.found ?? 0) + lines.length;
+  return ctx.pager.appendPage(lines, limit, label);
+}
 
 type Args = Record<string, unknown>;
 
@@ -91,14 +99,14 @@ function bool(args: Args, key: string, fallback: boolean): boolean {
 /** head lines, then the paged items with a cursor trailer, then the footer. */
 function renderQuery(result: QueryText, limit: number, ctx: ToolContext): string {
   const head = result.head.map((line) => `${line}\n`).join("");
-  return head + ctx.pager.appendPage(result.items, limit, result.label) + (result.footer ?? "");
+  return head + page(ctx, result.items, limit, result.label) + (result.footer ?? "");
 }
 
 /** head lines, then per group its header and paged items, then the footer. */
 function renderGrouped(result: GroupedText, limit: number, ctx: ToolContext): string {
   let text = result.head.map((line) => `${line}\n`).join("");
   for (const group of result.groups) {
-    text += `${group.header}\n${ctx.pager.appendPage(group.items, limit, group.label)}`;
+    text += `${group.header}\n${page(ctx, group.items, limit, group.label)}`;
   }
   return text + result.footer;
 }
@@ -156,9 +164,9 @@ function searchSymbols(args: Args, ctx: ToolContext): string {
   for (const result of results) {
     const lines = result.hits.map((hit) => `  ${hit.kind} ${hit.fqName}  ${formatPosition(hit.position)}`);
     text += `Live ${result.solution} (${result.total}):\n`;
-    text += ctx.pager.appendPage(lines, limit, `search_symbols ${pattern} in ${result.solution}`);
+    text += page(ctx, lines, limit, `search_symbols ${pattern} in ${result.solution}`);
   }
-  for (const group of indexed) text += `${group.header}\n${ctx.pager.appendPage(group.items, limit, group.label)}`;
+  for (const group of indexed) text += `${group.header}\n${page(ctx, group.items, limit, group.label)}`;
   return text;
 }
 
@@ -239,7 +247,10 @@ async function reviewChanges(args: Args, ctx: ToolContext): Promise<string> {
     solution: str(args, "solution"), base: str(args, "base"), includeTests: bool(args, "includeTests", true), limit,
     git: ctx.git, defaultSolution: ctx.defaultSolution, index: reviewIndexFor(ctx.store),
   });
-  return renderQuery(result, limit, ctx);
+  const text = renderQuery(result, limit, ctx);
+  // review_changes counts changed declarations (the footer's number), not the lines it prints
+  ctx.found = Number(/, (\d+) changed declarations/.exec(result.footer ?? "")?.[1] ?? 0);
+  return text;
 }
 
 /** Load the registered solution whose directory contains an absolute file path, when none loaded owns it yet. */

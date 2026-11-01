@@ -9,6 +9,7 @@ import type { GitProvider } from "../workspace/index.ts";
 import { createGit, indexSolution, isFresh, pathKey, WorkspaceManager } from "../workspace/index.ts";
 import { applyChanges, classifyChange, forgetMissing, PendingRefreshes, RepoWatcher } from "../watcher/index.ts";
 import { checkArguments } from "./arguments.ts";
+import { callerOf, clientOf, countsFound, formatCallLine, formatRejected } from "./callLog.ts";
 import { JobQueue } from "./jobs.ts";
 import type { WarmUpState } from "./jobs.ts";
 import { Pager } from "./pager.ts";
@@ -73,26 +74,82 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-async function callTool(params: unknown, opened: Opened): Promise<unknown> {
-  if (!isObject(params) || typeof params["name"] !== "string") throw new RpcError(-32602, "Invalid params: name is required");
+/** What the call log needs besides the call itself. */
+type CallEnv = {
+  warn: (message: string) => void;
+  caller: string | null;
+  parts: string[];
+  sessionId: string | undefined;
+  clients: Clients;
+};
+
+/** `clientInfo` of `initialize`: by `mcp-session-id` when the request carries one, else the last one seen. */
+type Clients = { bySession: Map<string, string | null>; last: string | null };
+
+async function callTool(params: unknown, opened: Opened, env: CallEnv): Promise<unknown> {
+  const rejectRpc = (tool: string | null, message: string): never => {
+    try {
+      env.warn(tool === null ? `WARN Rejected ? call with arguments []: ${message}` : formatRejected(tool, {}, message));
+    } catch {
+      // a call log failure never fails the call
+    }
+    throw new RpcError(-32602, message);
+  };
+  if (!isObject(params) || typeof params["name"] !== "string") {
+    const raw = isObject(params) ? params["name"] : undefined;
+    return rejectRpc(typeof raw === "string" ? raw : null,"Invalid params: name is required");
+  }
   const name = params["name"];
   const rawArgs = params["arguments"];
-  if (rawArgs !== undefined && !isObject(rawArgs)) throw new RpcError(-32602, "Invalid params: arguments must be an object");
-  const fail = (message: string) => ({ content: [{ type: "text", text: message }], isError: true });
+  if (rawArgs !== undefined && !isObject(rawArgs)) return rejectRpc(name, "Invalid params: arguments must be an object");
+  const started = performance.now();
+  const tool = TOOLS.find((t) => t.name === name);
+  const counted = countsFound(name, tool !== undefined);
+  if (!("error" in opened)) opened.ctx.found = 0;
+  const log = (result: { content: { text: string }[]; isError?: boolean }): void => {
+    try {
+      const client = env.sessionId !== undefined && env.clients.bySession.has(env.sessionId)
+        ? env.clients.bySession.get(env.sessionId)!
+        : env.clients.last;
+      const error = result.isError ? (result.content[0]?.text ?? "") : undefined;
+      env.warn(formatCallLine({
+        tool: name, args: rawArgs, found: counted ? ("error" in opened ? 0 : opened.ctx.found ?? 0) : null, client,
+        caller: env.caller, parts: env.parts, elapsedMs: performance.now() - started, ...(error === undefined ? {} : { error }),
+      }));
+    } catch {
+      // a call log failure never fails the call
+    }
+  };
+  const fail = (message: string) => {
+    const result = { content: [{ type: "text", text: message }], isError: true };
+    log(result);
+    return result;
+  };
   if ("error" in opened) return fail(opened.error);
   const checked = checkArguments(TOOLS, name, rawArgs ?? {});
-  if (!checked.ok) return fail(checked.text);
-  const tool = TOOLS.find((t) => t.name === name)!;
+  if (!checked.ok) {
+    try {
+      env.warn(formatRejected(name, rawArgs ?? {}, checked.text));
+    } catch {
+      // ignored
+    }
+    return fail(checked.text);
+  }
   try {
-    return { content: [{ type: "text", text: await tool.handler(checked.args, opened.ctx) }] };
+    const result = { content: [{ type: "text", text: await tool!.handler(checked.args, opened.ctx) }] };
+    log(result);
+    return result;
   } catch (error) {
     return fail(`domra: ${name} failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
-async function dispatch(method: string, params: unknown, opened: Opened): Promise<unknown> {
+async function dispatch(method: string, params: unknown, opened: Opened, env: CallEnv): Promise<unknown> {
   switch (method) {
     case "initialize": {
+      const client = clientOf(params);
+      if (env.sessionId !== undefined) env.clients.bySession.set(env.sessionId, client);
+      else env.clients.last = client;
       const requested = isObject(params) ? params["protocolVersion"] : undefined;
       const protocolVersion =
         typeof requested === "string" && SUPPORTED_VERSIONS.includes(requested) ? requested : LATEST_VERSION;
@@ -110,13 +167,13 @@ async function dispatch(method: string, params: unknown, opened: Opened): Promis
         })),
       };
     case "tools/call":
-      return callTool(params, opened);
+      return callTool(params, opened, env);
     default:
       throw new RpcError(-32601, "Method not found");
   }
 }
 
-async function handleMessage(body: string, opened: Opened): Promise<Reply> {
+async function handleMessage(body: string, opened: Opened, env: CallEnv): Promise<Reply> {
   let message: unknown;
   try {
     message = JSON.parse(body);
@@ -132,7 +189,7 @@ async function handleMessage(body: string, opened: Opened): Promise<Reply> {
   if (rawId === undefined) return { status: 202, type: "text/plain; charset=utf-8", body: "" };
   const id: JsonRpcId = typeof rawId === "string" || typeof rawId === "number" ? rawId : null;
   try {
-    return json({ jsonrpc: "2.0", id, result: await dispatch(method, message["params"], opened) });
+    return json({ jsonrpc: "2.0", id, result: await dispatch(method, message["params"], opened, env) });
   } catch (error) {
     if (error instanceof RpcError) return rpcFailure(id, error.code, error.message);
     return rpcFailure(id, -32603, error instanceof Error ? error.message : "Internal error");
@@ -185,14 +242,22 @@ export function refusedOrigin(headers: IncomingMessage["headers"], allowedOrigin
   return `Origin not allowed: ${origin}`;
 }
 
-async function route(request: IncomingMessage, ctx: ToolContext, allowedOrigins: readonly string[]): Promise<Reply> {
+async function route(
+  request: IncomingMessage, ctx: ToolContext, allowedOrigins: readonly string[], warn: (message: string) => void, clients: Clients,
+): Promise<Reply> {
   const refused = refusedOrigin(request.headers, allowedOrigins);
   if (refused) return text(403, refused);
   const url = new URL(request.url ?? "/", "http://localhost");
   const opened = (): Opened => openView(ctx, url.searchParams.getAll("part"));
   if (url.pathname === "/mcp") {
     if (request.method !== "POST") return text(405, "Method Not Allowed");
-    return handleMessage(await readBody(request), opened());
+    const header = request.headers["mcp-session-id"];
+    const parts = url.searchParams.getAll("part").filter((p) => p.trim() !== "");
+    const env: CallEnv = {
+      warn, caller: callerOf(url.searchParams.getAll("caller")), parts, clients,
+      sessionId: typeof header === "string" && header !== "" ? header : undefined,
+    };
+    return handleMessage(await readBody(request), opened(), env);
   }
   if (url.pathname === "/health") {
     if (request.method !== "GET") return text(405, "Method Not Allowed");
@@ -355,8 +420,9 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     sweepTimer.unref();
   }
 
+  const clients: Clients = { bySession: new Map(), last: null };
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
-    route(request, ctx, config.allowedOrigins)
+    route(request, ctx, config.allowedOrigins, warn, clients)
       .catch((error: unknown) => rpcFailure(null, -32603, error instanceof Error ? error.message : "Internal error"))
       .then((reply) => {
         response.writeHead(reply.status, { "Content-Type": reply.type, ...(reply.status === 405 ? { Allow: "POST" } : {}) });

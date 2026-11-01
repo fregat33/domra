@@ -125,6 +125,24 @@ With the first URL an agent sees the `shop` slot 1 and the base checkouts of eve
 
 `src/server/pager.ts`. In memory, capacity 128 results, TTL 30 minutes; on store, expired entries are evicted first, then the oldest. A cursor is 10 lowercase hex characters. `appendPage(lines, limit, label)` prints the first `max(1, limit)` lines and, when lines remain, `  ... N more (next_page cursor=...)`. `next_page` prints `Continued: {label}` and the following page (a new cursor when more remain; the old cursor stays valid). An unknown or expired cursor answers `Unknown or expired cursor. Cursors live in memory for 30 minutes; re-run the original query.` The clock and random source are injectable for tests.
 
+## Call log
+
+`src/server/callLog.ts`. Every `tools/call` (also of an unknown tool) writes one line through the `warn` logger, without the `domra: ` prefix:
+
+```
+INFO search_symbols pattern="UpgradeCase" limit=20 found=18 client="claude-code 2.1.311" caller="worker/sonnet/t1" part=- 3ms
+```
+
+- Tool name, then the arguments as `name=value` in the order received; with no arguments `found=` follows the name after one space.
+- Values: strings quoted and cut to 120 characters; numbers and booleans raw; `null`; arrays and objects as JSON text cut to 120, not quoted. A cut appends `…` after the limit; values are cut first, escaped after. Quoting escapes `\`, `"`, CR and LF (`\\`, `\"`, `\r`, `\n`), so a line is always one line. Keys of `[A-Za-z0-9_]{1,120}` are written as is, any other key (also empty) is cut and quoted like a value.
+- `found`: lines given to the pager over the call (`0` for an empty result); for `review_changes` the number of changed declarations (the `Total:` footer). `-` for `go_to_definition`, `get_symbol_info`, `next_page`, `status`, `reindex`, `load_solution`, `forget_solution` and unknown tools.
+- `client`: `"name version"` from the `clientInfo` of `initialize`, `-` when absent or the name is blank. The server is stateless per request, so it keeps the clientInfo in a map keyed by the `mcp-session-id` header when a request carries one, else a single last-seen value set by every `initialize`. Domra issues no session ids today, so the last-seen value is the normal path (with several clients the value is that of the latest `initialize`).
+- `caller`: the first `?caller=` query value, trimmed, cut to 100 characters, quoted; `-` when absent or blank. It changes no result.
+- `part`: the `part` query values joined by `;`, quoted; `-` when none.
+- The last field is the elapsed time as `Nms`.
+
+A normal line starts with `INFO `. A call whose result has `isError` starts with `WARN ` and ends with ` error=<first line of the text, cut to 199 characters, not quoted>`. A call rejected by the argument filter also writes `WARN Rejected {tool} call with arguments [{keys}]: {problem}` before that line (keys formatted as above, newlines in the problem replaced by spaces). A failure of the log itself never fails the call; tool results are not changed.
+
 ## Helper script
 
 ```
