@@ -1,6 +1,6 @@
 {
   "name": "domra",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "license": "MIT",
   "description": "Persistent TypeScript code-intelligence daemon for coding agents over MCP",
