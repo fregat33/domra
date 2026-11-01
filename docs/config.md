@@ -33,6 +33,7 @@ Later sources override earlier ones, per key:
 | `allowedOrigins` | `string[]` | `[]` | `DOMRA_ALLOWED_ORIGINS` |
 | `logDirectory` | `string \| null` | `null` (= `${LOCALAPPDATA ?? homedir}/domra/logs`) | `DOMRA_LOG_DIRECTORY` |
 | `logRetainedDays` | `number` | `7` | `DOMRA_LOG_RETAINED_DAYS` (`0` keeps all) |
+| `reextractDependents` | `boolean` | `true` | `DOMRA_REEXTRACT_DEPENDENTS` (`true` or `false`) |
 
 - `roots`: directories scanned for tsconfig solutions.
 - `preload`: solution names or paths loaded at startup.
@@ -52,5 +53,6 @@ Later sources override earlier ones, per key:
 - `allowedOrigins`: browser origins (exact, e.g. `https://app.example`) accepted in addition to loopback ones; see [server.md](server.md#origin-check).
 - `logDirectory`: directory of the daily log files (see [server.md](server.md#log-file)); `null` means `${LOCALAPPDATA ?? homedir}/domra/logs`. An empty string or `null` in the environment means the default.
 - `logRetainedDays`: number of newest `domra-*.clef` files kept; older ones are deleted at startup and at each date change. `0` or less keeps all.
+- `reextractDependents`: after a watcher batch changes the declared surface of a project, re-extract the stored documents of the projects that depend on it, in the same and in other loaded solutions (see [watcher.md](watcher.md#re-extracting-dependents)). `false` disables it; dependents then keep stale reference rows until their own files change or the solution is reindexed.
 
 Environment values: numbers are parsed with `Number`; list keys (`roots`, `preload`, `ignoredFolders`, `allowedOrigins`) take a JSON array, e.g. `DOMRA_ROOTS='["C:/src"]'`; for `defaultSolution`, an empty string or `null` means no default.

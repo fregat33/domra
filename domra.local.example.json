@@ -3,5 +3,6 @@
   "preload": ["my-solution"],
   "defaultSolution": "my-solution",
   "logDirectory": null,
-  "logRetainedDays": 7
+  "logRetainedDays": 7,
+  "reextractDependents": true
 }

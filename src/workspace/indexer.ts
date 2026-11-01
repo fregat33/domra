@@ -218,6 +218,44 @@ export function indexDocuments(
   return { changedProjects: [...changed].sort(), documentsExtracted };
 }
 
+/**
+ * Rewrite the stored extraction of every tracked document of the named projects from their current
+ * programs, replacing the blobs even when the content is unchanged (references resolve against the
+ * current declarations). Call `host.setFile` first for changes the project has not seen yet.
+ */
+export function reextractProjects(
+  store: IndexStore,
+  solution: LoadedSolution,
+  projectNames: readonly string[],
+  options: Pick<IndexOptions, "now"> = {},
+): { projects: number; documents: number } {
+  const now = options.now ?? Date.now;
+  const names = new Set(projectNames);
+  let projects = 0;
+  let documents = 0;
+  store.transaction(() => {
+    for (const project of solution.projects) {
+      if (!names.has(project.name)) continue;
+      const program = project.service.getProgram();
+      if (!program) continue;
+      const id = store.getProject(project.tsconfig)?.id ?? ensureProject(store, project, solution);
+      const checker = program.getTypeChecker();
+      projects++;
+      for (const path of store.getTree(id).keys()) {
+        const sourceFile = program.getSourceFile(path);
+        if (!sourceFile) continue;
+        const text = project.host.getText(sourceFile.fileName) ?? sourceFile.text;
+        const hash = contentHash(text);
+        store.writeBlob(id, hash, extractDocument(project, sourceFile, checker, { solution, program }), { replace: true, now: now() });
+        const stat = statOf(path) ?? { mtime: 0, size: Buffer.byteLength(text, "utf8") };
+        store.setTreeEntry(id, toSlashes(sourceFile.fileName), hash, stat.mtime, stat.size, now());
+        documents++;
+      }
+    }
+  });
+  return { projects, documents };
+}
+
 /** Drop a deleted document from the tree of every project of the solution. */
 export function removeDocument(store: IndexStore, solution: LoadedSolution, path: string): void {
   const fileName = normalizePath(path);
