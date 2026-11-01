@@ -375,7 +375,8 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
           const report = applyChanges({ manager, store, pending, ignoredFolders: config.ignoredFolders, roots: config.roots, warn }, batch);
           ctx.changes.batches++;
           ctx.changes.lastBatch = { at: new Date(), files: batch.paths.size };
-          if (batch.overflowed || report.discovered.length > 0 || report.forgotten.length > 0) ctx.syncWatch?.();
+          const hasGit = [...batch.paths].some((p) => classifyChange(p, config.ignoredFolders) === "git");
+          if (batch.overflowed || hasGit || (batch.directories?.size ?? 0) > 0 || report.discovered.length > 0 || report.forgotten.length > 0) ctx.syncWatch?.();
           const touched = new Set([...report.reconciled, ...report.reloaded]);
           for (const solution of manager.solutions) {
             if (touched.has(solution.name)) await recordHead(ctx, solution);
