@@ -20,6 +20,7 @@ export type DomraConfig = {
   allowedOrigins: string[];
   logDirectory: string | null;
   logRetainedDays: number;
+  reextractDependents: boolean;
 };
 
 export const DEFAULT_CONFIG: DomraConfig = {
@@ -41,6 +42,7 @@ export const DEFAULT_CONFIG: DomraConfig = {
   allowedOrigins: [],
   logDirectory: null,
   logRetainedDays: 7,
+  reextractDependents: true,
 };
 
 const ENV_KEYS: Record<keyof DomraConfig, string> = {
@@ -62,6 +64,7 @@ const ENV_KEYS: Record<keyof DomraConfig, string> = {
   allowedOrigins: "DOMRA_ALLOWED_ORIGINS",
   logDirectory: "DOMRA_LOG_DIRECTORY",
   logRetainedDays: "DOMRA_LOG_RETAINED_DAYS",
+  reextractDependents: "DOMRA_REEXTRACT_DEPENDENTS",
 };
 
 function readJsonFile(path: string): Partial<DomraConfig> {
@@ -142,6 +145,8 @@ function readEnv(env: Record<string, string | undefined>): Partial<DomraConfig> 
   if (logDirectory !== undefined) result.logDirectory = logDirectory === "" || logDirectory === "null" ? null : logDirectory;
   const logRetained = get("logRetainedDays");
   if (logRetained !== undefined) result.logRetainedDays = parseNumber(ENV_KEYS.logRetainedDays, logRetained);
+  const reextract = get("reextractDependents");
+  if (reextract !== undefined) result.reextractDependents = parseBoolean(ENV_KEYS.reextractDependents, reextract);
   return result;
 }
 

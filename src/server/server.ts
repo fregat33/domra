@@ -403,7 +403,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
             batchCount = slot.count;
             if (pendingOverflow === slot) pendingOverflow = null;
           }
-          const report = applyChanges({ manager, store, pending, ignoredFolders: config.ignoredFolders, roots: config.roots, warn }, batch);
+          const report = applyChanges({ manager, store, pending, ignoredFolders: config.ignoredFolders, roots: config.roots, reextractDependents: config.reextractDependents, warn }, batch);
           ctx.changes.batches += batchCount;
           ctx.changes.lastBatch = { at: new Date(), files: batch.paths.size };
           const hasGit = [...batch.paths].some((p) => classifyChange(p, config.ignoredFolders) === "git");

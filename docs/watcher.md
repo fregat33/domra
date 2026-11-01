@@ -41,6 +41,16 @@ Runs as the `changes` job. Paths are classified again, then:
 4. Other `project` paths: the solution with the longest `dir` prefix is reloaded (once per batch) and re-indexed; an unloaded one is touched as pending; no solution means ignore.
 5. `source` paths grouped by owning solution (longest `dir` prefix): unloaded solutions are touched as pending. In a loaded one a missing file is set to `null` in its hosts, dropped from the roots and removed from the index; an existing file is read (retrying `EBUSY`/`EPERM` up to 5 times with `50 * (n + 1)` ms back-off), added as a root of the project with the longest `dir` prefix when no project owns it and that project's tsconfig lists it, and pushed into the hosts when its text differs. Changed documents are then re-extracted with `indexDocuments`.
 
+## Re-extracting dependents
+
+`indexDocuments` returns `changedProjects`: the projects whose `surfaceHash` (non-private symbols and relations, not references or positions) changed; a project with no previous extraction counts as changed. After the batch's documents (rules 3 and 5) `propagateSurfaceChanges` runs once per batch, in the same `changes` job, unless `reextractDependents` is `false` or nothing changed. A body-only edit changes no surface and re-extracts nothing.
+
+- Dependency edges of a solution: a project's tsconfig `references` entry naming another project's tsconfig (`readReferences`), or a `package.json` dependency (`dependencies`, `devDependencies`, `peerDependencies`, `optionalDependencies`) naming another project's package `name`. Closure is transitive; each project is visited once, so cycles terminate.
+- Origin solution: targets are the changed projects plus their transitive dependents.
+- Every other loaded solution: seeds are its projects that are the same tsconfig as a changed project, reference it, or declare its package name as a dependency; targets are the seeds plus their transitive dependents. The changed files are first pushed into those projects' hosts where their program contains the file, so the language service sees the change. No `reload` happens.
+- A target project has the blob of every tracked document rewritten (`reextractProjects`, `writeBlob` with `replace`) from its current program, even when the file content is unchanged. Each project is re-extracted once per batch; an origin that was reloaded in the same batch is skipped (the reload re-indexes it).
+- One log line per solution: `domra: Re-extracted {count} documents of {n} dependent projects in {solution} in {ms}ms`. `ApplyReport.reextracted` is the total number of documents.
+
 ## Branch refs and worktrees
 
 The classifier only reports `<root>/.git/HEAD` under `.git`, so every extra watcher below reports that synthetic path for its checkout root. `RepoWatcher.syncWorktrees(dirs, repoRootOf)` keeps up to three non-recursive watchers per wanted repository root (`resolveGitHead(root)` in `gitHead.ts` finds the paths):
@@ -67,11 +77,11 @@ Unloaded refresh: demo (1 files, last change 4s ago)
 Unloaded refresh: none pending
 ```
 
-The number of buffered paths is what the debouncer holds and has not yet turned into a `changes` job; `status` also prints `Ready: yes` or `Ready: no ({N} jobs, {M} buffered)` after these lines. `Watcher: off` replaces both when the watcher is off. Log lines (stderr): `domra: Watching {root}`, `domra: watch root missing: {root}`, `domra: watcher error on {root}: {message}`, `domra: Git HEAD changed; reconciling {N} loaded solutions`, `domra: Reconciled {name}: {U} updated, {A} added, {R} removed, {E} extracted in {ms}ms`, `domra: {name}: project file changed, reloaded in {ms}ms`, `domra: {name}: applied {N} file changes, {M} documents re-extracted`, `domra: refreshed {name} in {ms}ms`, `domra: discovered {name} ({path})`, `domra: forgot {name} ({path}): tsconfig is gone, {N} projects removed from the index`.
+The number of buffered paths is what the debouncer holds and has not yet turned into a `changes` job; `status` also prints `Ready: yes` or `Ready: no ({N} jobs, {M} buffered)` after these lines. `Watcher: off` replaces both when the watcher is off. Log lines (stderr): `domra: Watching {root}`, `domra: watch root missing: {root}`, `domra: watcher error on {root}: {message}`, `domra: Git HEAD changed; reconciling {N} loaded solutions`, `domra: Reconciled {name}: {U} updated, {A} added, {R} removed, {E} extracted in {ms}ms`, `domra: {name}: project file changed, reloaded in {ms}ms`, `domra: {name}: applied {N} file changes, {M} documents re-extracted`, `domra: Re-extracted {count} documents of {n} dependent projects in {solution} in {ms}ms`, `domra: refreshed {name} in {ms}ms`, `domra: discovered {name} ({path})`, `domra: forgot {name} ({path}): tsconfig is gone, {N} projects removed from the index`.
 
 ## Known limits
 
-- Dependents of a changed declared surface are not re-extracted (follow-up); only the changed documents are.
+- Dependents are found by tsconfig `references` and `package.json` dependencies only. A consumer that imports a project through a `paths` mapping, a relative path or `node_modules` without either link is not seen. Unloaded solutions are not re-extracted (they are refreshed by the pending mechanism).
 - `fileCount` and `sourceFiles` counters of a loaded solution are not updated when root files are added or removed; they refresh on reload.
 - `fs.watch` with `recursive: true` is native on Windows and macOS; on Linux it depends on the Node version (older versions throw or do not support it). Where it fails, `domra: watcher error ...` is logged and no events arrive.
 - A tsconfig that appears while the server runs is found through a watcher event for a file named exactly `tsconfig.json`, a directory event (moved or renamed folders; directories inside a registered solution are not scanned) or the re-discovery on overflow. Disappearance is also found by the periodic sweep.
