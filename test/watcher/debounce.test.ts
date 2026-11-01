@@ -34,6 +34,23 @@ test("markOverflow is reported and flush emits at once", () => {
   debouncer.dispose();
 });
 
+test("markOverflow with roots collects their union; without a root it is global", () => {
+  const batches: ChangeBatch[] = [];
+  const debouncer = new ChangeDebouncer({ quietMs: 5000, onFlush: (b) => batches.push(b) });
+  debouncer.markOverflow("a");
+  debouncer.markOverflow("b");
+  assert.equal(debouncer.buffered, 1);
+  debouncer.flush();
+  assert.deepEqual([...batches[0]!.overflowedRoots!].sort(), ["a", "b"]);
+  assert.ok(!batches[0]!.overflowedGlobally);
+  debouncer.markOverflow("a");
+  debouncer.markOverflow();
+  debouncer.flush();
+  assert.equal(batches[1]!.overflowedGlobally, true);
+  assert.equal(batches[1]!.overflowed, true);
+  debouncer.dispose();
+});
+
 test("max wait flushes a never-quiet stream", async () => {
   const started = Date.now();
   let firstFlush = 0;

@@ -1,5 +1,15 @@
-/** `directories`: existing directories that were reported whole (moved or renamed in); absent when none. */
-export type ChangeBatch = { paths: Set<string>; overflowed: boolean; directories?: Set<string> };
+/**
+ * `directories`: existing directories that were reported whole (moved or renamed in); absent when none.
+ * `overflowed` is true on any overflow; `overflowedRoots` names the roots that lost events, and an overflow
+ * without roots (or `overflowedGlobally`) is global.
+ */
+export type ChangeBatch = {
+  paths: Set<string>;
+  overflowed: boolean;
+  directories?: Set<string>;
+  overflowedRoots?: Set<string>;
+  overflowedGlobally?: boolean;
+};
 
 export type DebouncerOptions = {
   quietMs: number;
@@ -39,8 +49,10 @@ export class ChangeDebouncer {
   }
 
   /** The current batch lost events; consumers must reconcile instead of trusting the paths. */
-  markOverflow(): void {
+  markOverflow(root?: string): void {
     this.batch.overflowed = true;
+    if (root === undefined) this.batch.overflowedGlobally = true;
+    else (this.batch.overflowedRoots ??= new Set()).add(root);
     this.arm();
   }
 

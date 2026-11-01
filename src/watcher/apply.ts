@@ -298,19 +298,37 @@ export function applyChanges(ctx: ApplyContext, batch: ChangeBatch): ApplyReport
     if (!report.pendingTouched.includes(solution.path)) report.pendingTouched.push(solution.path);
   };
   const appeared = new Set<string>();
-  const touchUnloaded = (): void => {
+  const touchUnloaded = (inScope: (solution: DiscoveredSolution) => boolean): void => {
     for (const solution of ctx.manager.solutions) {
       const key = pathKey(solution.path);
-      if (!loadedKeys.has(key) && !appeared.has(key)) touch(solution, solution.path);
+      if (!loadedKeys.has(key) && !appeared.has(key) && inScope(solution)) touch(solution, solution.path);
     }
   };
 
-  const kinds = [...batch.paths].map((path) => ({ path, kind: classifyChange(path, ctx.ignoredFolders) }));
+  const allKinds = [...batch.paths].map((path) => ({ path, kind: classifyChange(path, ctx.ignoredFolders) }));
+  const hasGit = allKinds.some((k) => k.kind === "git");
+  const scopedRoots =
+    batch.overflowed && !batch.overflowedGlobally && !hasGit && batch.overflowedRoots && batch.overflowedRoots.size > 0
+      ? [...batch.overflowedRoots]
+      : null;
+  const scopedKeys = (scopedRoots ?? []).map(pathKey);
+  const underRoots = (path: string): boolean => {
+    const key = pathKey(path);
+    return scopedKeys.some((root) => key === root || key.startsWith(`${root}/`));
+  };
+  const globalOverflow = batch.overflowed && !scopedRoots;
+  // Paths inside a scoped overflow root are covered by its reconcile.
+  const kinds = scopedRoots ? allKinds.filter((k) => !underRoots(k.path)) : allKinds;
+  const directories = scopedRoots && batch.directories ? new Set([...batch.directories].filter((d) => !underRoots(d))) : batch.directories;
   if (batch.overflowed || kinds.some((k) => k.kind === "git" || k.kind === "project")) clearPackageCache();
 
   const found: string[] = [];
-  if (batch.overflowed && ctx.roots) found.push(...registerScanned(ctx, discoverSolutions(ctx.roots, ctx.ignoredFolders)));
-  if (batch.directories) found.push(...scanDirectories(ctx, batch.directories));
+  if (globalOverflow && ctx.roots) found.push(...registerScanned(ctx, discoverSolutions(ctx.roots, ctx.ignoredFolders)));
+  if (scopedRoots) {
+    for (const root of scopedRoots) ctx.warn(`domra: File watcher overflow under ${root}; scheduling reconcile of that root`);
+    found.push(...registerScanned(ctx, discoverSolutions(scopedRoots, ctx.ignoredFolders)));
+  }
+  if (directories) found.push(...scanDirectories(ctx, directories));
   for (const { path, kind } of kinds) {
     if (kind === "project" && registerAppeared(ctx, path)) found.push(normalizePath(path));
   }
@@ -319,9 +337,15 @@ export function applyChanges(ctx: ApplyContext, batch: ChangeBatch): ApplyReport
     report.discovered.push(normalizePath(path));
   }
 
-  if (batch.overflowed || kinds.some((k) => k.kind === "git")) {
-    const loaded = ctx.manager.loadedSolutions;
-    ctx.warn(`domra: Git HEAD changed; reconciling ${loaded.length} loaded solutions`);
+  const reloadedKeys = new Set<string>();
+  if (globalOverflow || hasGit || scopedRoots) {
+    const inScope = (solution: { dir: string }): boolean => !scopedRoots || underRoots(solution.dir);
+    const loaded = ctx.manager.loadedSolutions.filter(inScope);
+    ctx.warn(
+      scopedRoots
+        ? `domra: Reconciling ${loaded.length} loaded solutions under overflowed roots`
+        : `domra: Git HEAD changed; reconciling ${loaded.length} loaded solutions`,
+    );
     for (const solution of loaded) {
       const { delta, extracted } = reconcileSolution(ctx, solution);
       report.applied += delta.applied;
@@ -336,13 +360,13 @@ export function applyChanges(ctx: ApplyContext, batch: ChangeBatch): ApplyReport
       const reloaded = ctx.manager.reload(solution.path);
       indexSolution(ctx.store, reloaded, { ignoredFolders: ctx.ignoredFolders });
       report.reloaded.push(reloaded.name);
+      reloadedKeys.add(pathKey(solution.path));
       ctx.warn(`domra: ${reloaded.name}: project file changed, reloaded in ${Math.round(performance.now() - started)}ms`);
     }
-    touchUnloaded();
-    return report;
+    touchUnloaded(inScope);
+    if (!scopedRoots) return report;
   }
 
-  const reloadedKeys = new Set<string>();
   for (const { path, kind } of kinds) {
     if (kind !== "project" || appeared.has(pathKey(path))) continue;
     const solution = solutionFor(ctx.manager, path);
