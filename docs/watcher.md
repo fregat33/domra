@@ -81,7 +81,7 @@ The number of buffered paths is what the debouncer holds and has not yet turned 
 
 ## Known limits
 
-- Dependents are found by tsconfig `references` and `package.json` dependencies only. A consumer that imports a project through a `paths` mapping, a relative path or `node_modules` without either link is not seen. Unloaded solutions are not re-extracted (they are refreshed by the pending mechanism).
+- Dependents are found by tsconfig `references` and `package.json` dependencies only. A consumer that imports a project through a `paths` mapping, a relative path or `node_modules` without either link is not seen. Unloaded solutions are not re-extracted after a surface change. A consumer solution that is not loaded is touched only when the batch has its own paths under it (then it is recorded as a pending refresh), so its stored references can stay stale until then.
 - `fileCount` and `sourceFiles` counters of a loaded solution are not updated when root files are added or removed; they refresh on reload.
 - `fs.watch` with `recursive: true` is native on Windows and macOS; on Linux it depends on the Node version (older versions throw or do not support it). Where it fails, `domra: watcher error ...` is logged and no events arrive.
 - A tsconfig that appears while the server runs is found through a watcher event for a file named exactly `tsconfig.json`, a directory event (moved or renamed folders; directories inside a registered solution are not scanned) or the re-discovery on overflow. Disappearance is also found by the periodic sweep.

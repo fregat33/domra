@@ -39,6 +39,10 @@ export type ToolContext = {
   heads: Map<string, string | null>;
   /** Re-resolve which linked-worktree HEADs the watcher follows after solutions were registered or forgotten. */
   syncWatch?: () => void;
+  /** The one-time git probe, shared by all requests: started by the first `status`, `line` is the text after `Git: `. */
+  gitProbe?: { started: boolean; line: string | null };
+  /** `preload` and `defaultSolution` names: the solutions `status` marks pinned and idle eviction keeps. */
+  pinned?: string[];
   /** Which solutions are private (inside a linked worktree). */
   slots: Slots;
   /** Set on the per-request context: the parts of the request URL. */
@@ -279,7 +283,7 @@ export const TOOLS: ToolDefinition[] = [
     name: "status",
     description: "Server status: memory, index counts, background jobs, file watcher and pending refreshes, and the load state of every known solution.",
     inputSchema: schema({}, []),
-    idempotent: false,
+    idempotent: true,
     handler: (_args, ctx) => statusText(ctx),
   },
   {
@@ -302,13 +306,13 @@ export const TOOLS: ToolDefinition[] = [
       "Re-walk a loaded solution (or 'all') and refresh the index. Use force=true to re-extract every file even when its content hash is unchanged.",
     inputSchema: schema(
       {
-        solution: { type: "string", description: "Solution name, or 'all'." },
+        solution: { type: "string", description: "Solution name, or 'all'. Blank or absent: the configured default solution." },
         force: { type: "boolean", description: "Re-extract unchanged files too.", default: false },
       },
-      ["solution"],
+      [],
     ),
     idempotent: true,
-    handler: (args, ctx) => reindexText(ctx, str(args, "solution")!, bool(args, "force", false)),
+    handler: (args, ctx) => reindexText(ctx, str(args, "solution"), bool(args, "force", false)),
   },
   {
     name: "package_drift",

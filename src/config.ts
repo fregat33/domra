@@ -21,6 +21,8 @@ export type DomraConfig = {
   logDirectory: string | null;
   logRetainedDays: number;
   reextractDependents: boolean;
+  /** Minutes without use after which a loaded, unpinned solution is unloaded; 0 = never. */
+  idleEvictionMinutes: number;
 };
 
 export const DEFAULT_CONFIG: DomraConfig = {
@@ -43,6 +45,7 @@ export const DEFAULT_CONFIG: DomraConfig = {
   logDirectory: null,
   logRetainedDays: 7,
   reextractDependents: true,
+  idleEvictionMinutes: 0,
 };
 
 const ENV_KEYS: Record<keyof DomraConfig, string> = {
@@ -65,6 +68,7 @@ const ENV_KEYS: Record<keyof DomraConfig, string> = {
   logDirectory: "DOMRA_LOG_DIRECTORY",
   logRetainedDays: "DOMRA_LOG_RETAINED_DAYS",
   reextractDependents: "DOMRA_REEXTRACT_DEPENDENTS",
+  idleEvictionMinutes: "DOMRA_IDLE_EVICTION_MINUTES",
 };
 
 function readJsonFile(path: string): Partial<DomraConfig> {
@@ -147,6 +151,8 @@ function readEnv(env: Record<string, string | undefined>): Partial<DomraConfig> 
   if (logRetained !== undefined) result.logRetainedDays = parseNumber(ENV_KEYS.logRetainedDays, logRetained);
   const reextract = get("reextractDependents");
   if (reextract !== undefined) result.reextractDependents = parseBoolean(ENV_KEYS.reextractDependents, reextract);
+  const idle = get("idleEvictionMinutes");
+  if (idle !== undefined) result.idleEvictionMinutes = parseNumber(ENV_KEYS.idleEvictionMinutes, idle);
   return result;
 }
 

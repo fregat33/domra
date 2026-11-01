@@ -17,11 +17,18 @@ import type { WarmUpState } from "./jobs.ts";
 import { Pager } from "./pager.ts";
 import { preloadSolutions, TOOLS } from "./tools.ts";
 import type { ToolContext } from "./tools.ts";
-import { enqueueIndex, recordHead, statusText } from "./status.ts";
+import { enqueueIndex, pinnedKeys, recordHead, statusText } from "./status.ts";
 import { openView, Slots } from "./view.ts";
 
 /** `git` replaces the git provider built from `gitPath` (tests inject a fake). */
-export type ServerOptions = Partial<DomraConfig> & { warn?: (message: string) => void; git?: GitProvider };
+export type ServerOptions = Partial<DomraConfig> & {
+  warn?: (message: string) => void;
+  git?: GitProvider;
+  /** The clock of "last used" and idle eviction (tests). */
+  now?: () => number;
+  /** Period of the idle eviction timer in ms (default and maximum rate: once a minute). */
+  idleCheckMs?: number;
+};
 
 export type RunningServer = {
   port: number;
@@ -31,6 +38,8 @@ export type RunningServer = {
   jobs: JobQueue;
   watcher: RepoWatcher | null;
   pending: PendingRefreshes | null;
+  /** Whether the idle eviction timer runs (`idleEvictionMinutes` > 0). */
+  evictsIdle: boolean;
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -165,9 +174,19 @@ async function dispatch(method: string, params: unknown, opened: Opened, env: Ca
           name: t.name,
           description: t.description,
           inputSchema: t.inputSchema,
-          annotations: { readOnlyHint: !MUTATING_TOOLS.has(t.name), idempotentHint: t.idempotent },
+          annotations: {
+            readOnlyHint: !MUTATING_TOOLS.has(t.name),
+            destructiveHint: t.name === "forget_solution",
+            idempotentHint: t.idempotent,
+          },
         })),
       };
+    case "prompts/list":
+      return { prompts: [] };
+    case "resources/list":
+      return { resources: [] };
+    case "resources/templates/list":
+      return { resourceTemplates: [] };
     case "tools/call":
       return callTool(params, opened, env);
     default:
@@ -282,6 +301,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     logFile.write(message);
   };
   const manager = new WorkspaceManager({ roots: config.roots, ignoredFolders: config.ignoredFolders });
+  if (options.now) manager.now = options.now;
   manager.discover();
   const store = IndexStore.open(config.indexPath ?? defaultIndexPath());
   try {
@@ -295,6 +315,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     manager, pager: new Pager(), defaultSolution: config.defaultSolution, store, jobs, warmUp,
     ignoredFolders: config.ignoredFolders, watcher: null, pending: null, changes: { batches: 0, lastBatch: null },
     git: options.git ?? createGit(config.gitPath), heads: new Map(), slots: new Slots(config.gitPath, manager),
+    gitProbe: { started: false, line: null }, pinned: [...config.preload, ...(config.defaultSolution === null ? [] : [config.defaultSolution])],
   };
   let warming = false;
   manager.onLoad = (solution) => {
@@ -317,8 +338,9 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
   preloadSolutions(manager, names, warn);
   if (config.warmUp) {
     warmUp.ran = true;
+    warmUp.failed = [];
     for (const solution of manager.solutions) {
-      const loaded = manager.resolveSolution(solution.path) !== null;
+      const loaded = manager.peekSolution(solution.path) !== null;
       if (loaded || isFresh(store, solution, { ignoredFolders: config.ignoredFolders })) {
         warmUp.fresh++;
         if (!loaded) void jobs.enqueue(`head ${solution.name}`, () => recordHead(ctx, solution));
@@ -328,10 +350,13 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
       void jobs.enqueue(`warm-up ${solution.name}`, async () => {
         warmUp.current = solution.name;
         try {
-          if (!manager.isRegistered(solution.path) || manager.resolveSolution(solution.path) !== null) return;
+          if (!manager.isRegistered(solution.path) || manager.peekSolution(solution.path) !== null) return;
           loadIndexUnload(solution.path);
           await recordHead(ctx, solution);
           warmUp.warmed++;
+        } catch (error) {
+          warmUp.failed!.push(solution.name);
+          throw error;
         } finally {
           warmUp.done++;
           warmUp.current = null;
@@ -359,7 +384,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
       void jobs.enqueue(`refresh ${solution.name}`, async () => {
         queued.delete(key);
         pending.take(solution.path);
-        if (!manager.isRegistered(solution.path) || manager.resolveSolution(solution.path) !== null) return;
+        if (!manager.isRegistered(solution.path) || manager.peekSolution(solution.path) !== null) return;
         if (isFresh(store, solution, { ignoredFolders: config.ignoredFolders })) {
           await recordHead(ctx, solution);
           return;
@@ -419,7 +444,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
           if (repoKeys.length > 0) {
             for (const solution of manager.solutions) {
               const dir = pathKey(solution.dir);
-              if (manager.resolveSolution(solution.path) !== null) continue;
+              if (manager.peekSolution(solution.path) !== null) continue;
               if (repoKeys.some((root) => dir === root || dir.startsWith(`${root}/`))) enqueueRefresh(solution.path);
             }
           }
@@ -461,6 +486,31 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     sweepTimer.unref();
   }
 
+  let evictionTimer: NodeJS.Timeout | null = null;
+  if (config.idleEvictionMinutes > 0) {
+    const idleMs = config.idleEvictionMinutes * 60_000;
+    const period = Math.max(options.idleCheckMs ?? 60_000, 1);
+    evictionTimer = setInterval(() => {
+      const now = manager.now();
+      const pinned = pinnedKeys(ctx);
+      const idle = manager.loadedSolutions.filter((s) => {
+        const used = manager.lastUsedAt(s.path);
+        return !pinned.has(pathKey(s.path)) && used !== null && now - used >= idleMs;
+      });
+      if (idle.length === 0) return;
+      void jobs.enqueue("idle eviction", () => {
+        const at = manager.now();
+        const pinned = pinnedKeys(ctx);
+        for (const s of manager.loadedSolutions) {
+          const used = manager.lastUsedAt(s.path);
+          if (pinned.has(pathKey(s.path)) || used === null || at - used < idleMs) continue;
+          if (manager.unload(s.path)) warn(`domra: Evicted ${s.name} after ${config.idleEvictionMinutes} idle minutes`);
+        }
+      });
+    }, period);
+    evictionTimer.unref();
+  }
+
   const clients: Clients = { bySession: new Map(), last: null };
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
     route(request, ctx, config.allowedOrigins, warn, clients)
@@ -482,7 +532,9 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     jobs,
     watcher: ctx.watcher,
     pending: ctx.pending,
+    evictsIdle: evictionTimer !== null,
     close: async () => {
+      if (evictionTimer) clearInterval(evictionTimer);
       if (refreshTimer) clearInterval(refreshTimer);
       if (sweepTimer) clearInterval(sweepTimer);
       ctx.watcher?.close();

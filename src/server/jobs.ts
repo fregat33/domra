@@ -1,5 +1,5 @@
 /** Progress of the startup warm-up, shown by `status`. */
-export type WarmUpState = { ran: boolean; total: number; done: number; current: string | null; warmed: number; fresh: number };
+export type WarmUpState = { ran: boolean; total: number; done: number; current: string | null; warmed: number; fresh: number; failed?: string[] };
 
 type Job = { name: string; run: () => void | Promise<void>; resolve: () => void };
 

@@ -4,5 +4,6 @@
   "defaultSolution": "my-solution",
   "logDirectory": null,
   "logRetainedDays": 7,
-  "reextractDependents": true
+  "reextractDependents": true,
+  "idleEvictionMinutes": 0
 }
