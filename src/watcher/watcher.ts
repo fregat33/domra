@@ -253,7 +253,7 @@ export class RepoWatcher {
     }
     watcher.on("error", (error: Error) => {
       this.options.warn(`domra: watcher error on ${root}: ${error.message}`);
-      this.debouncer.markOverflow();
+      this.debouncer.markOverflow(root);
       watcher.close();
       this.watchers.delete(root);
       if (retry && !this.closed) this.attach(root, false);

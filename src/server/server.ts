@@ -7,6 +7,7 @@ import { DEFAULT_CONFIG } from "../config.ts";
 import { defaultIndexPath, IndexStore } from "../index/index.ts";
 import type { GitProvider } from "../workspace/index.ts";
 import { createGit, indexSolution, isFresh, pathKey, WorkspaceManager } from "../workspace/index.ts";
+import type { ChangeBatch } from "../watcher/debounce.ts";
 import { applyChanges, classifyChange, forgetMissing, PendingRefreshes, RepoWatcher } from "../watcher/index.ts";
 import { checkArguments } from "./arguments.ts";
 import { callerOf, clientOf, countsFound, formatCallLine, formatRejected } from "./callLog.ts";
@@ -344,6 +345,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     const pending = new PendingRefreshes();
     const quietMs = Math.max(100, config.debounceMs);
     const queued = new Set<string>();
+    let pendingOverflow: { batch: ChangeBatch; count: number } | null = null;
     /** Queue a refresh job for an unloaded solution; it records HEAD on every path and re-indexes only a stale index. */
     const enqueueRefresh = (path: string): void => {
       const solution = manager.findRegistered(path);
@@ -370,10 +372,39 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     };
     const watcher = new RepoWatcher({
       roots: config.roots, ignoredFolders: config.ignoredFolders, quietMs, warn,
-      onBatch: (batch) => {
+      onBatch: (incoming) => {
+        // Overflow batches still waiting in the queue merge into one reconcile; the first queued job drains it.
+        if (incoming.overflowed && pendingOverflow) {
+          const target = pendingOverflow.batch;
+          for (const p of incoming.paths) target.paths.add(p);
+          if (incoming.directories?.size) {
+            target.directories ??= new Set();
+            for (const d of incoming.directories) target.directories.add(d);
+          }
+          if (incoming.overflowedGlobally || !incoming.overflowedRoots?.size) target.overflowedGlobally = true;
+          for (const r of incoming.overflowedRoots ?? []) (target.overflowedRoots ??= new Set()).add(r);
+          pendingOverflow.count++;
+          return;
+        }
+        let batch = incoming;
+        let slot: { batch: ChangeBatch; count: number } | null = null;
+        if (incoming.overflowed) {
+          batch = {
+            paths: new Set(incoming.paths), overflowed: true,
+            directories: incoming.directories ? new Set(incoming.directories) : undefined,
+            overflowedRoots: new Set(incoming.overflowedRoots ?? []),
+            overflowedGlobally: incoming.overflowedGlobally || !incoming.overflowedRoots?.size,
+          };
+          slot = pendingOverflow = { batch, count: 1 };
+        }
         void jobs.enqueue("changes", async () => {
+          let batchCount = 1;
+          if (slot) {
+            batchCount = slot.count;
+            if (pendingOverflow === slot) pendingOverflow = null;
+          }
           const report = applyChanges({ manager, store, pending, ignoredFolders: config.ignoredFolders, roots: config.roots, warn }, batch);
-          ctx.changes.batches++;
+          ctx.changes.batches += batchCount;
           ctx.changes.lastBatch = { at: new Date(), files: batch.paths.size };
           const hasGit = [...batch.paths].some((p) => classifyChange(p, config.ignoredFolders) === "git");
           if (batch.overflowed || hasGit || (batch.directories?.size ?? 0) > 0 || report.discovered.length > 0 || report.forgotten.length > 0) ctx.syncWatch?.();
