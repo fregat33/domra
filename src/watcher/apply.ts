@@ -77,11 +77,17 @@ function solutionFor(manager: WorkspaceManager, path: string): DiscoveredSolutio
   return best;
 }
 
-/** Forget a solution (unload, unregister, drop pending refreshes and index rows); null when the hint matches nothing. */
+/**
+ * Forget a solution (unload, unregister, drop pending refreshes and index rows); null when the hint matches nothing.
+ * A hint naming 2+ solutions forgets nothing and returns them as `ambiguous`.
+ */
 export function forgetSolution(
   manager: WorkspaceManager, store: IndexStore, pending: PendingRefreshes | null, hint: string,
-): { solution: DiscoveredSolution; projectsRemoved: number } | null {
-  const solution = manager.forget(hint);
+): { solution: DiscoveredSolution; projectsRemoved: number } | { ambiguous: DiscoveredSolution[] } | null {
+  const candidates = manager.resolveForForget(hint);
+  if (candidates.length === 0) return null;
+  if (candidates.length > 1) return { ambiguous: candidates };
+  const solution = manager.forget(candidates[0]!.path);
   if (!solution) return null;
   pending?.take(solution.path);
   return { solution, projectsRemoved: store.deleteSolution(solution.path) };
@@ -95,7 +101,7 @@ export function forgetMissing(
   for (const solution of manager.solutions) {
     if (existsSync(solution.path)) continue;
     const forgotten = forgetSolution(manager, store, pending, solution.path);
-    if (!forgotten) continue;
+    if (!forgotten || "ambiguous" in forgotten) continue;
     names.push(solution.name);
     warn(`domra: forgot ${solution.name} (${solution.path}): tsconfig is gone, ${forgotten.projectsRemoved} projects removed from the index`);
   }
