@@ -1,6 +1,7 @@
 import type { FSWatcher } from "node:fs";
 import { existsSync, readFileSync, statSync, watch } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { resolveGitHead } from "./gitHead.ts";
 import { normalizePath, pathKey } from "../workspace/index.ts";
 import { classifyChange } from "./classifier.ts";
 import { ChangeDebouncer } from "./debounce.ts";
@@ -23,6 +24,40 @@ function isDirectory(path: string): boolean {
   }
 }
 
+type RefTarget = { dir: string; filter: string; watcher: FSWatcher };
+
+type RootState = {
+  root: string;
+  event: string;
+  gitDir: string;
+  /** `ino:birthtimeMs` of the git dir when its watchers were made; a different value means it was recreated. */
+  identity: string;
+  linked: boolean;
+  head: FSWatcher | null;
+  ref: RefTarget | null;
+  packed: RefTarget | null;
+};
+
+function gitDirIdentity(gitDir: string): string {
+  try {
+    const stat = statSync(gitDir);
+    return `${stat.ino}:${stat.birthtimeMs}`;
+  } catch {
+    return "";
+  }
+}
+
+/** Nearest existing directory at or below `<common>/refs/heads` on the way to the loose ref, and the name to filter on. */
+function refTarget(commonDir: string, looseRef: string): { dir: string; filter: string } | null {
+  const heads = normalizePath(join(commonDir, "refs", "heads"));
+  let dir = normalizePath(dirname(looseRef));
+  while (!isDirectory(dir) && dir !== heads && dir.length > heads.length) dir = normalizePath(dirname(dir));
+  if (!isDirectory(dir) || !(dir === heads || dir.startsWith(`${heads}/`))) return null;
+  const rest = looseRef.slice(dir.length + 1);
+  const filter = rest.split("/")[0];
+  return filter ? { dir, filter } : null;
+}
+
 /** The git dir a `<root>/.git` file points to (`gitdir: <path>`); null when `.git` is a directory, missing or unreadable. */
 function linkedGitDir(root: string): string | null {
   const dotGit = join(root, ".git");
@@ -40,7 +75,7 @@ export class RepoWatcher {
   private readonly options: RepoWatcherOptions;
   private readonly debouncer: ChangeDebouncer;
   private readonly watchers = new Map<string, FSWatcher>();
-  private readonly headWatchers = new Map<string, FSWatcher>();
+  private readonly roots_ = new Map<string, RootState>();
   private closed = false;
 
   constructor(options: RepoWatcherOptions) {
@@ -68,39 +103,115 @@ export class RepoWatcher {
    */
   syncWorktrees(dirs: readonly string[], repoRootOf: (dir: string) => string | null): void {
     if (this.closed) return;
-    const wanted = new Map<string, { gitDir: string; event: string }>();
+    const wanted = new Map<string, string>();
     for (const dir of dirs) {
       const root = repoRootOf(dir);
-      const gitDir = root === null ? null : linkedGitDir(root);
-      if (root !== null && gitDir !== null) wanted.set(pathKey(gitDir), { gitDir, event: `${normalizePath(root)}/.git/HEAD` });
+      if (root !== null) wanted.set(pathKey(root), normalizePath(root));
     }
-    for (const [key, watcher] of this.headWatchers) {
+    for (const [key, state] of this.roots_) {
       if (wanted.has(key)) continue;
-      watcher.close();
-      this.headWatchers.delete(key);
+      this.closeState(state);
+      this.roots_.delete(key);
     }
-    for (const [key, { gitDir, event }] of wanted) {
-      if (this.headWatchers.has(key) || !existsSync(gitDir)) continue;
-      try {
-        const watcher = watch(gitDir, (_event, filename) => {
-          if (filename?.toString() === "HEAD") this.debouncer.add(event);
-        });
-        watcher.on("error", (error: Error) => {
-          this.options.warn(`domra: watcher error on ${gitDir}: ${error.message}`);
-          watcher.close();
-          this.headWatchers.delete(key);
-          this.debouncer.add(event);
-        });
-        this.headWatchers.set(key, watcher);
-      } catch (error) {
-        this.options.warn(`domra: watcher error on ${gitDir}: ${error instanceof Error ? error.message : String(error)}`);
+    for (const [key, root] of wanted) {
+      const info = resolveGitHead(root);
+      if (info === null) {
+        const old = this.roots_.get(key);
+        if (old) this.closeState(old);
+        this.roots_.delete(key);
+        continue;
       }
+      const gitDir = normalizePath(dirname(info.headPath));
+      const identity = gitDirIdentity(gitDir);
+      let state = this.roots_.get(key);
+      if (state && (state.gitDir !== gitDir || state.identity !== identity)) {
+        this.closeState(state);
+        state = undefined;
+      }
+      if (!state) {
+        state = { root, event: `${root}/.git/HEAD`, gitDir, identity, linked: linkedGitDir(root) !== null, head: null, ref: null, packed: null };
+        this.roots_.set(key, state);
+      }
+      if (state.linked && state.head === null) this.attachHead(state);
+      this.repoint(state);
     }
   }
 
   /** Git dirs whose HEAD is watched because a registered solution lives in a linked worktree. */
   get worktreeHeads(): string[] {
-    return [...this.headWatchers.keys()];
+    return [...this.roots_.values()].filter((s) => s.head !== null).map((s) => pathKey(s.gitDir));
+  }
+
+  /** Sorted `dir/filter` of every ref and packed-refs watcher. */
+  get refWatchTargets(): string[] {
+    const out: string[] = [];
+    for (const state of this.roots_.values()) {
+      for (const target of [state.ref, state.packed]) if (target) out.push(`${target.dir}/${target.filter}`);
+    }
+    return out.sort();
+  }
+
+  private closeState(state: RootState): void {
+    state.head?.close();
+    state.head = null;
+    state.ref?.watcher.close();
+    state.ref = null;
+    state.packed?.watcher.close();
+    state.packed = null;
+  }
+
+  private openWatch(dir: string, filter: string | null, onEvent: () => void, onError: () => void): FSWatcher | null {
+    try {
+      const watcher = watch(dir, (_event, filename) => {
+        if (this.closed) return;
+        if (filter === null || filename === null || filename === undefined || filename.toString() === filter) onEvent();
+      });
+      watcher.on("error", (error: Error) => {
+        this.options.warn(`domra: watcher error on ${dir}: ${error.message}`);
+        watcher.close();
+        onError();
+      });
+      return watcher;
+    } catch (error) {
+      this.options.warn(`domra: watcher error on ${dir}: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
+  private attachHead(state: RootState): void {
+    if (!existsSync(state.gitDir)) return;
+    const watcher = this.openWatch(state.gitDir, "HEAD", () => {
+      this.debouncer.add(state.event);
+      this.repoint(state);
+    }, () => {
+      if (state.head === watcher) state.head = null;
+      this.debouncer.add(state.event);
+    });
+    state.head = watcher;
+  }
+
+  /** Re-resolve the ref and packed-refs targets of a checkout; unchanged targets keep their watchers. */
+  private repoint(state: RootState): void {
+    if (this.closed || this.roots_.get(pathKey(state.root)) !== state) return;
+    const info = resolveGitHead(state.root);
+    const ref = info?.looseRef ? refTarget(info.commonDir, info.looseRef) : null;
+    const packed = info?.packedRefs ? { dir: info.commonDir, filter: "packed-refs" } : null;
+    for (const slot of ["ref", "packed"] as const) {
+      const desired = slot === "ref" ? ref : packed;
+      const current = state[slot];
+      if (current && desired && current.dir === desired.dir && current.filter === desired.filter) continue;
+      current?.watcher.close();
+      state[slot] = null;
+      if (!desired || !isDirectory(desired.dir)) continue;
+      const watcher = this.openWatch(desired.dir, desired.filter, () => {
+        this.debouncer.add(state.event);
+        this.repoint(state);
+      }, () => {
+        if (state[slot]?.watcher === watcher) state[slot] = null;
+        this.debouncer.add(state.event);
+      });
+      if (watcher) state[slot] = { ...desired, watcher };
+    }
   }
 
   start(): void {
@@ -117,8 +228,8 @@ export class RepoWatcher {
     this.closed = true;
     for (const watcher of this.watchers.values()) watcher.close();
     this.watchers.clear();
-    for (const watcher of this.headWatchers.values()) watcher.close();
-    this.headWatchers.clear();
+    for (const state of this.roots_.values()) this.closeState(state);
+    this.roots_.clear();
     this.debouncer.dispose();
   }
 

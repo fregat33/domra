@@ -39,6 +39,20 @@ Runs as the `changes` job. Paths are classified again, then:
 4. Other `project` paths: the solution with the longest `dir` prefix is reloaded (once per batch) and re-indexed; an unloaded one is touched as pending; no solution means ignore.
 5. `source` paths grouped by owning solution (longest `dir` prefix): unloaded solutions are touched as pending. In a loaded one a missing file is set to `null` in its hosts, dropped from the roots and removed from the index; an existing file is read (retrying `EBUSY`/`EPERM` up to 5 times with `50 * (n + 1)` ms back-off), added as a root of the project with the longest `dir` prefix when no project owns it and that project's tsconfig lists it, and pushed into the hosts when its text differs. Changed documents are then re-extracted with `indexDocuments`.
 
+## Branch refs and worktrees
+
+The classifier only reports `<root>/.git/HEAD` under `.git`, so every extra watcher below reports that synthetic path for its checkout root. `RepoWatcher.syncWorktrees(dirs, repoRootOf)` keeps up to three non-recursive watchers per wanted repository root (`resolveGitHead(root)` in `gitHead.ts` finds the paths):
+
+- `<common>` is `<root>/.git` for a normal repository; for a linked worktree it is `<gitdir>/commondir` resolved against `<gitdir>`, falling back to `<gitdir>/../..`.
+- HEAD: only for linked worktrees (a normal root's `.git/HEAD` is already seen by the recursive root watcher); watches `<gitdir>` filtered on `HEAD`.
+- Ref: when HEAD is `ref: refs/heads/<branch>`, the loose ref `<common>/refs/heads/<branch>`. If its directory does not exist yet (branch `a/b`, or a branch only in `packed-refs`), the nearest existing directory at or below `<common>/refs/heads` is watched, filtered on the next path segment.
+- Packed refs: `<common>/packed-refs` (watched through `<common>`, filtered on the name), for a symbolic HEAD.
+- A detached HEAD has no ref or packed-refs watcher. Names are matched in the callback; a null file name counts as a match.
+- Every event of these watchers is added as `<root>/.git/HEAD` and re-resolves the targets: a branch switch re-points them, unchanged targets keep their watchers. Two checkouts on one common dir have their own watchers and report their own roots.
+- A root that is no longer wanted gets its watchers closed; `close()` closes all. Watcher errors only warn; the failed watcher is dropped and re-created by the next `syncWorktrees`.
+- `syncWatch` (which calls `syncWorktrees`) runs after every batch with a `git` path, a non-empty `directories` or an overflow, and after discovery or forgetting. A same-path recreate of a worktree may raise no `error`, so `syncWorktrees` also compares the git dir's identity (`ino` + `birthtimeMs`) stored per root and replaces the watchers when it differs.
+- Test helpers: `worktreeHeads` (git dirs with a HEAD watcher) and `refWatchTargets` (sorted `dir/filter` strings).
+
 ## Unloaded solutions
 
 `PendingRefreshes` records `first` and `last` change times per solution. A timer (every `clamp(quiet / 4, 1000, 15000)` ms) enqueues `refresh {name}` for solutions with `now - last >= unloadedRefreshSeconds` or `now - first >= unloadedRefreshMaxWaitSeconds` (0 disables a rule). The job skips a solution that was forgotten or loaded meanwhile, or that is `isFresh`; otherwise it loads, indexes and unloads it.
