@@ -32,10 +32,26 @@ function matchByHint<T extends { name: string; path: string }>(items: T[], hint:
   const key = pathKey(hint);
   return (
     items.find((s) => pathKey(s.path) === key) ??
-    items.find((s) => s.name === hint) ??
+    items.find((s) => s.name.toLowerCase() === hint.toLowerCase()) ??
     items.find((s) => s.name.toLowerCase().includes(hint.toLowerCase())) ??
     null
   );
+}
+
+/** Every item the trimmed hint names: the exact path, else all exact names, else all names containing it (case-insensitive); sorted by path. */
+function candidatesByHint<T extends { name: string; path: string }>(items: T[], hint: string): T[] {
+  const text = hint.trim();
+  if (text === "") return [];
+  const key = pathKey(text);
+  const lower = text.toLowerCase();
+  const byPath = items.filter((s) => pathKey(s.path) === key);
+  const found = byPath.length > 0
+    ? byPath
+    : (() => {
+        const exact = items.filter((s) => s.name.toLowerCase() === lower);
+        return exact.length > 0 ? exact : items.filter((s) => s.name.toLowerCase().includes(lower));
+      })();
+  return [...found].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 
 /** Registered and loaded solutions; loading order is preserved for resolution. */
@@ -128,6 +144,11 @@ export class WorkspaceManager {
     this.unload(solution.path);
     this.registered.delete(pathKey(solution.path));
     return solution;
+  }
+
+  /** The visible registered solutions a hint names for forgetting (see `candidatesByHint`); empty for a blank hint or no match. */
+  resolveForForget(hint: string): DiscoveredSolution[] {
+    return candidatesByHint(this.solutions, hint);
   }
 
   /** A loaded solution by full path, then exact name, then name substring. */

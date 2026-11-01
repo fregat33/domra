@@ -83,6 +83,12 @@ export function loadSolutionText(manager: WorkspaceManager, hint: string): strin
 export function forgetSolutionText(ctx: ToolContext, hint: string): string {
   const forgotten = forgetSolution(ctx.manager, ctx.store, ctx.pending, hint);
   if (forgotten === null) return unknownSolutionText(ctx.manager, hint);
+  if ("ambiguous" in forgotten) {
+    const text = hint.trim();
+    const list = forgotten.ambiguous.map((s) => `${s.name} (${s.path})`).join(", ");
+    const allExact = forgotten.ambiguous.every((s) => s.name.toLowerCase() === text.toLowerCase());
+    return `Ambiguous solution: ${text} matches ${list}. ${allExact ? "Use the full path." : "Use the full path or the exact name."}`;
+  }
   const { solution, projectsRemoved } = forgotten;
   ctx.syncWatch?.();
   return `Forgot ${solution.name} (${solution.path}): ${projectsRemoved} projects removed from the index.`;
