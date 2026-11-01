@@ -53,7 +53,7 @@ async function call(name: string, args: Record<string, unknown> = {}): Promise<s
   return reply.result.content[0]!.text;
 }
 
-const head = (sha: string): string => `${tsconfig}  HEAD ${sha.slice(0, 7)}`;
+const head = (sha: string): string => `head ${sha.slice(0, 7)}  ${tsconfig}`;
 
 async function settled(sha: string): Promise<void> {
   await until(async () => {
@@ -75,7 +75,7 @@ test("warm-up records the HEAD of an unloaded worktree solution", async () => {
     const expected = git(slot, "rev-parse", "--short=7", "HEAD");
     await until(async () => {
       const text = await (await fetch(`http://127.0.0.1:${warm.port}/health?part=${encodeURIComponent(slot)}`)).text();
-      return text.includes(`${tsconfig}  HEAD ${expected}`) && text.includes("Ready: yes");
+      return text.includes(`head ${expected}  ${tsconfig}`) && text.includes("Ready: yes");
     }, 10000);
   } finally {
     await warm.close();
@@ -151,7 +151,7 @@ test("an unloaded worktree solution follows branch switches: README-only switch,
   const ready = async (sha: string): Promise<void> => {
     await until(async () => {
       const status = await ask("status");
-      return status.includes(`${config}  HEAD ${sha.slice(0, 7)}`) && status.includes("Ready: yes");
+      return status.includes(`head ${sha.slice(0, 7)}  ${config}`) && status.includes("Ready: yes");
     }, 10000);
   };
   try {

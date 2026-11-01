@@ -23,7 +23,44 @@ function warmUpText(ctx: ToolContext): string {
   if (warm.done < warm.total) {
     return `Warm-up: ${warm.done} of ${warm.total} done${warm.current === null ? "" : `, loading ${warm.current}`}\n`;
   }
-  return `Warm-up: done, ${warm.warmed} warmed, ${warm.fresh} already fresh\n`;
+  const failed = warm.failed ?? [];
+  const failures = failed.length > 0 ? `, ${failed.length} failed (${failed.join(", ")})` : "";
+  return `Warm-up: done, ${warm.warmed} warmed, ${warm.fresh} already fresh${failures}\n`;
+}
+
+/** Start the one-time git probe if it has not started; the result shows in `Git:` of a later `status`. Never throws. */
+export function startGitProbe(ctx: ToolContext): void {
+  const probe = ctx.gitProbe;
+  if (!probe || probe.started) return;
+  probe.started = true;
+  const git = ctx.git;
+  const run = async (): Promise<string> => {
+    if (git.version) {
+      const result = await git.version();
+      return "version" in result ? result.version : `not found (${result.error})`;
+    }
+    const error = await git.probe();
+    return error === null ? "git version unknown" : `not found (${error})`;
+  };
+  void run().then(
+    (line) => void (probe.line = line.split(/\r?\n/)[0] ?? ""),
+    (error: unknown) => void (probe.line = `not found (${(error instanceof Error ? error.message : String(error)).split(/\r?\n/)[0]})`),
+  );
+}
+
+function gitText(ctx: ToolContext): string {
+  startGitProbe(ctx);
+  return `Git: ${ctx.gitProbe?.line ?? "not probed yet"}\n`;
+}
+
+/** The pathKeys of the solutions `preload` and `defaultSolution` name. */
+export function pinnedKeys(ctx: Pick<ToolContext, "manager" | "pinned">): Set<string> {
+  const keys = new Set<string>();
+  for (const name of ctx.pinned ?? []) {
+    const found = ctx.manager.findRegistered(name);
+    if (found) keys.add(pathKey(found.path));
+  }
+  return keys;
 }
 
 function watcherText(ctx: ToolContext): string {
@@ -62,14 +99,18 @@ export function statusText(ctx: ToolContext): string {
   text += `Jobs: ${ctx.jobs.pending} pending${last ? `, last completed ${clock(last.at)} ${last.name}` : ""}\n`;
   text += watcherText(ctx);
   text += readyText(ctx);
+  text += gitText(ctx);
   text += `${warmUpText(ctx)}Solutions:\n`;
   const rows = ctx.manager.status().sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const pinned = pinnedKeys(ctx);
   for (const s of rows) {
     const head = ctx.heads.get(pathKey(s.path))?.slice(0, 7) ?? "-";
-    text +=
-      s.state === "loaded"
-        ? `  ${s.name}  loaded  ${s.projects.length} projects, ${s.sourceFiles ?? 0} source files, loaded in ${seconds(s.loadMs)}s  ${s.path}  HEAD ${head}\n`
-        : `  ${s.name}  registered  ${s.path}  HEAD ${head}\n`;
+    if (s.state === "loaded") {
+      const used = s.lastUsed === null ? "-" : clock(new Date(s.lastUsed));
+      text += `  ${s.name}  loaded${pinned.has(pathKey(s.path)) ? " pinned" : ""}  ${s.projects.length} projects, ${s.sourceFiles ?? 0} source files, loaded in ${seconds(s.loadMs)}s, last used ${used}  head ${head}  ${s.path}\n`;
+    } else {
+      text += `  ${s.name}  registered  head ${head}  ${s.path}${s.error === null ? "" : `  error: ${s.error}`}\n`;
+    }
   }
   return text;
 }
@@ -97,16 +138,20 @@ export function forgetSolutionText(ctx: ToolContext, hint: string): string {
 /** Queue `index {solution}` for a loaded solution; skipped when it was unloaded meanwhile. */
 export function enqueueIndex(ctx: ToolContext, solution: { name: string; path: string }, force = false): void {
   void ctx.jobs.enqueue(`index ${solution.name}`, async () => {
-    const loaded = ctx.manager.resolveSolution(solution.path);
+    const loaded = ctx.manager.peekSolution(solution.path);
     if (!loaded) return;
     indexSolution(ctx.store, loaded, { force, ignoredFolders: ctx.ignoredFolders });
     await recordHead(ctx, loaded);
   });
 }
 
-export function reindexText(ctx: ToolContext, hint: string, force: boolean): string {
+/** `hint` blank or absent means the configured default solution; 'all' (any case, trimmed) means every loaded one. */
+export function reindexText(ctx: ToolContext, rawHint: string | undefined, force: boolean): string {
   const flag = `(force=${force})`;
-  if (hint === "all") {
+  const given = (rawHint ?? "").trim();
+  const hint = given === "" ? (ctx.defaultSolution ?? "") : given;
+  if (hint === "") return unknownSolutionText(ctx.manager, "");
+  if (hint.toLowerCase() === "all") {
     const loaded = ctx.manager.loadedSolutions;
     for (const solution of loaded) enqueueIndex(ctx, solution, force);
     return `Queued reindex of ${loaded.length} loaded solutions ${flag}.`;

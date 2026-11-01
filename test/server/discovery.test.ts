@@ -58,7 +58,7 @@ test("a tsconfig that appears under a root is registered lazily and answers quer
   assert.ok(!(await listed("freshapp")));
   const tsconfig = writeApp("freshapp", "FreshThing");
   await until(() => listed(tsconfig), 5000);
-  assert.ok((await call("status")).includes(`freshapp  registered  ${tsconfig}`));
+  assert.ok((await call("status")).includes(`freshapp  registered  head -  ${tsconfig}`));
   const found = await call("search_symbols", { pattern: "FreshThing", solution: tsconfig });
   assert.ok(/class FreshThing/.test(found), found);
 });

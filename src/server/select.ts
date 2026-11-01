@@ -38,7 +38,9 @@ export function selectSolutions(
   }
   for (const path of first) loadHinted(manager, path);
   if (manager.loadedSolutions.length === 0 && defaultSolution !== null) loadHinted(manager, defaultSolution);
-  return { solutions: manager.loadedSolutions };
+  const solutions = manager.loadedSolutions;
+  for (const solution of solutions) manager.touch(solution);
+  return { solutions };
 }
 
 export function isNotFound(result: QueryText): boolean {

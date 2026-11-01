@@ -11,6 +11,8 @@ export type GitChanges = { mergeBase: string; files: ChangedFile[] };
 export interface GitProvider {
   /** Null when git can be started, else the error text. */
   probe(): Promise<string | null>;
+  /** First line of `git --version` (e.g. 'git version 2.43.0'), or the error text. Optional: fakes may omit it; `status` then uses `probe`. */
+  version?(): Promise<{ version: string } | { error: string }>;
   /** The directory holding `.git` (a directory or a worktree file), walking up from `dir`; null outside a repository. */
   repoRoot(dir: string): string | null;
   /** Full `git rev-parse HEAD` of the repository containing `dir`; null outside git or when git fails. Optional: fakes may omit it. */
@@ -37,6 +39,7 @@ function firstLine(result: { stderr: string; message: string }): string {
 /** `GitProvider` running `gitPath` as a child process. */
 export function createGit(gitPath = "git"): GitProvider {
   let probed: Promise<string | null> | undefined;
+  let versioned: Promise<{ version: string } | { error: string }> | undefined;
 
   const run = (cwd: string | undefined, args: string[]): Promise<RunResult> =>
     new Promise((done) => {
@@ -57,6 +60,15 @@ export function createGit(gitPath = "git"): GitProvider {
         result.ok ? null : `'${gitPath}' could not be started (${result.message}); install git or set gitPath in the config`,
       );
       return probed;
+    },
+
+    version() {
+      versioned ??= run(undefined, ["--version"]).then((result) =>
+        result.ok
+          ? { version: (result.stdout.trim().split(/\r?\n/)[0] ?? "").trim() }
+          : { error: firstLine(result) },
+      );
+      return versioned;
     },
 
     repoRoot(dir) {

@@ -483,7 +483,7 @@ export function applyChanges(ctx: ApplyContext, batch: ChangeBatch): ApplyReport
       continue;
     }
     if (reloadedKeys.has(key)) continue;
-    const solution = ctx.manager.resolveSolution(discovered.path);
+    const solution = ctx.manager.peekSolution(discovered.path);
     if (!solution) continue;
     let entry = deltas.get(key);
     if (!entry) {
