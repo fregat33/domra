@@ -31,6 +31,8 @@ Later sources override earlier ones, per key:
 | `discoverySweepSeconds` | `number` | `30` | `DOMRA_DISCOVERY_SWEEP_SECONDS` (`0` disables) |
 | `gitPath` | `string` | `"git"` | `DOMRA_GIT_PATH` |
 | `allowedOrigins` | `string[]` | `[]` | `DOMRA_ALLOWED_ORIGINS` |
+| `logDirectory` | `string \| null` | `null` (= `${LOCALAPPDATA ?? homedir}/domra/logs`) | `DOMRA_LOG_DIRECTORY` |
+| `logRetainedDays` | `number` | `7` | `DOMRA_LOG_RETAINED_DAYS` (`0` keeps all) |
 
 - `roots`: directories scanned for tsconfig solutions.
 - `preload`: solution names or paths loaded at startup.
@@ -48,5 +50,7 @@ Later sources override earlier ones, per key:
 - `discoverySweepSeconds`: period of the sweep that forgets registered solutions whose tsconfig no longer exists (new tsconfigs are found by the watcher, see [watcher.md](watcher.md)); `0` disables the sweep.
 - `gitPath`: the git executable `review_changes` (and the CLI `review`) runs: a name looked up on `PATH` or an absolute path. Nothing else starts git. When it cannot be started the answer is `review_changes: '{gitPath}' could not be started ({message}); install git or set gitPath in the config`.
 - `allowedOrigins`: browser origins (exact, e.g. `https://app.example`) accepted in addition to loopback ones; see [server.md](server.md#origin-check).
+- `logDirectory`: directory of the daily log files (see [server.md](server.md#log-file)); `null` means `${LOCALAPPDATA ?? homedir}/domra/logs`. An empty string or `null` in the environment means the default.
+- `logRetainedDays`: number of newest `domra-*.clef` files kept; older ones are deleted at startup and at each date change. `0` or less keeps all.
 
 Environment values: numbers are parsed with `Number`; list keys (`roots`, `preload`, `ignoredFolders`, `allowedOrigins`) take a JSON array, e.g. `DOMRA_ROOTS='["C:/src"]'`; for `defaultSolution`, an empty string or `null` means no default.

@@ -11,6 +11,7 @@ import { applyChanges, classifyChange, forgetMissing, PendingRefreshes, RepoWatc
 import { checkArguments } from "./arguments.ts";
 import { callerOf, clientOf, countsFound, formatCallLine, formatRejected } from "./callLog.ts";
 import { JobQueue } from "./jobs.ts";
+import { defaultLogDirectory, LogFile } from "./logFile.ts";
 import type { WarmUpState } from "./jobs.ts";
 import { Pager } from "./pager.ts";
 import { preloadSolutions, TOOLS } from "./tools.ts";
@@ -270,7 +271,15 @@ async function route(
 /** Start the MCP server on 127.0.0.1; `port: 0` picks a free port. */
 export async function startServer(options: ServerOptions = {}): Promise<RunningServer> {
   const config = { ...DEFAULT_CONFIG, ...options };
-  const warn = options.warn ?? ((message: string) => void process.stderr.write(`${message}\n`));
+  const stderr = (message: string): void => void process.stderr.write(`${message}\n`);
+  const logFile = options.warn !== undefined && options.logDirectory == null
+    ? null
+    : new LogFile(config.logDirectory ?? defaultLogDirectory(), config.logRetainedDays, stderr);
+  const sink = options.warn ?? stderr;
+  const warn = logFile === null ? sink : (message: string): void => {
+    sink(message);
+    logFile.write(message);
+  };
   const manager = new WorkspaceManager({ roots: config.roots, ignoredFolders: config.ignoredFolders });
   manager.discover();
   const store = IndexStore.open(config.indexPath ?? defaultIndexPath());
@@ -451,6 +460,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
       });
       await jobs.idle();
       store.close();
+      logFile?.close();
     },
   };
 }

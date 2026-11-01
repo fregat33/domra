@@ -18,6 +18,8 @@ export type DomraConfig = {
   discoverySweepSeconds: number;
   gitPath: string;
   allowedOrigins: string[];
+  logDirectory: string | null;
+  logRetainedDays: number;
 };
 
 export const DEFAULT_CONFIG: DomraConfig = {
@@ -37,6 +39,8 @@ export const DEFAULT_CONFIG: DomraConfig = {
   discoverySweepSeconds: 30,
   gitPath: "git",
   allowedOrigins: [],
+  logDirectory: null,
+  logRetainedDays: 7,
 };
 
 const ENV_KEYS: Record<keyof DomraConfig, string> = {
@@ -56,6 +60,8 @@ const ENV_KEYS: Record<keyof DomraConfig, string> = {
   discoverySweepSeconds: "DOMRA_DISCOVERY_SWEEP_SECONDS",
   gitPath: "DOMRA_GIT_PATH",
   allowedOrigins: "DOMRA_ALLOWED_ORIGINS",
+  logDirectory: "DOMRA_LOG_DIRECTORY",
+  logRetainedDays: "DOMRA_LOG_RETAINED_DAYS",
 };
 
 function readJsonFile(path: string): Partial<DomraConfig> {
@@ -132,6 +138,10 @@ function readEnv(env: Record<string, string | undefined>): Partial<DomraConfig> 
   if (gitPath !== undefined && gitPath !== "") result.gitPath = gitPath;
   const origins = get("allowedOrigins");
   if (origins !== undefined) result.allowedOrigins = parseList(ENV_KEYS.allowedOrigins, origins);
+  const logDirectory = get("logDirectory");
+  if (logDirectory !== undefined) result.logDirectory = logDirectory === "" || logDirectory === "null" ? null : logDirectory;
+  const logRetained = get("logRetainedDays");
+  if (logRetained !== undefined) result.logRetainedDays = parseNumber(ENV_KEYS.logRetainedDays, logRetained);
   return result;
 }
 

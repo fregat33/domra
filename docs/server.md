@@ -143,6 +143,15 @@ INFO search_symbols pattern="UpgradeCase" limit=20 found=18 client="claude-code 
 
 A normal line starts with `INFO `. A call whose result has `isError` starts with `WARN ` and ends with ` error=<first line of the text, cut to 199 characters, not quoted>`. A call rejected by the argument filter also writes `WARN Rejected {tool} call with arguments [{keys}]: {problem}` before that line (keys formatted as above, newlines in the problem replaced by spaces). A failure of the log itself never fails the call; tool results are not changed.
 
+## Log file
+
+`src/server/logFile.ts`. Everything that goes through `warn` (server, watcher, job and call-log output) is also appended to a daily JSON-lines file `{logDirectory}/domra-YYYYMMDD.clef` (local date; default directory `${LOCALAPPDATA ?? homedir}/domra/logs`). Stderr output is unchanged, `INFO `/`WARN ` prefixes included.
+
+- One object per line: `@t` (ISO 8601 UTC), `@l` (`Warning` for a `WARN ` prefix, omitted otherwise, as CLEF omits Information), `@m` (the message without the `INFO `/`WARN ` prefix).
+- Appends are synchronous (`appendFileSync`), so several processes can share a file and nothing is lost on a crash. A write failure warns once on stderr and never throws.
+- At startup and at every date change, `domra-YYYYMMDD.clef` files beyond the newest `logRetainedDays` are deleted (`<= 0` keeps all). Other files are never touched.
+- When `startServer` gets its own `warn` (tests, embedders), no file is written unless `logDirectory` is set in the options.
+
 ## Helper script
 
 ```

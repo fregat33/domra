@@ -70,6 +70,33 @@ test("watcher config defaults and env overrides", () => {
   }
 });
 
+test("log config defaults and env overrides", () => {
+  const dir = mkdtempSync(join(tmpdir(), "domra-config-"));
+  const keys = ["DOMRA_LOG_DIRECTORY", "DOMRA_LOG_RETAINED_DAYS"];
+  const saved = keys.map((k) => process.env[k]);
+  try {
+    for (const k of keys) delete process.env[k];
+    const defaults = loadConfig(dir);
+    assert.equal(defaults.logDirectory, null);
+    assert.equal(defaults.logRetainedDays, 7);
+    process.env.DOMRA_LOG_DIRECTORY = "C:/logs";
+    process.env.DOMRA_LOG_RETAINED_DAYS = "3";
+    const config = loadConfig(dir);
+    assert.equal(config.logDirectory, "C:/logs");
+    assert.equal(config.logRetainedDays, 3);
+    process.env.DOMRA_LOG_DIRECTORY = "";
+    assert.equal(loadConfig(dir).logDirectory, null);
+    process.env.DOMRA_LOG_RETAINED_DAYS = "many";
+    assert.throws(() => loadConfig(dir), /DOMRA_LOG_RETAINED_DAYS/);
+  } finally {
+    keys.forEach((k, i) => {
+      if (saved[i] === undefined) delete process.env[k];
+      else process.env[k] = saved[i];
+    });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("index config defaults and env overrides", () => {
   const dir = mkdtempSync(join(tmpdir(), "domra-config-"));
   const keys = ["DOMRA_INDEX_PATH", "DOMRA_WARM_UP", "DOMRA_BLOB_RETENTION_DAYS"];
