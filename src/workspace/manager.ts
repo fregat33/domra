@@ -58,6 +58,10 @@ function candidatesByHint<T extends { name: string; path: string }>(items: T[], 
   return [...found].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 
+function fileNames(paths: readonly string[]): string {
+  return paths.map((path) => path.split(/[\\/]/).pop() ?? path).join(", ");
+}
+
 /** Registered and loaded solutions; loading order is preserved for resolution. */
 export class WorkspaceManager {
   private readonly config: Pick<DomraConfig, "roots" | "ignoredFolders">;
@@ -72,6 +76,12 @@ export class WorkspaceManager {
 
   /** Called after a solution was newly loaded (not for an already loaded one). */
   onLoad: ((solution: LoadedSolution) => void) | null = null;
+
+  /** Receives the manager's log lines (`domra: {name}: ...`). */
+  onWarn: ((message: string) => void) | null = null;
+
+  /** The loader `load` calls; tests replace it. */
+  loader: typeof loadSolution = loadSolution;
 
   /** Called after a solution was registered (also when it replaces an earlier registration of the same path). */
   onRegister: ((solution: DiscoveredSolution) => void) | null = null;
@@ -120,7 +130,15 @@ export class WorkspaceManager {
     if (!existsSync(solution.path)) throw new Error(`unknown solution: ${hint}`);
     let result: LoadedSolution;
     try {
-      result = loadSolution(solution, this.registry);
+      result = this.loader(solution, this.registry);
+      if (result.changedDuringLoad.length > 0) {
+        this.onWarn?.(`domra: ${solution.name}: project files changed while it was loading (${fileNames(result.changedDuringLoad)}); loading once more`);
+        for (const project of result.projects) project.service.dispose();
+        result = this.loader(solution, this.registry);
+        if (result.changedDuringLoad.length > 0) {
+          this.onWarn?.(`domra: ${solution.name}: project files changed during two loads in a row (${fileNames(result.changedDuringLoad)}); keeping the second load`);
+        }
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.loadErrors.set(key, message.split(/\r?\n/)[0] ?? "");

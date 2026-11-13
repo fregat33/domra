@@ -175,6 +175,10 @@ export type LoadedSolution = {
   loadMs: number;
   /** mtime+size (`mtime:size`, null when absent) of the project files at load time, by path; see `projectFilesChanged`. */
   projectStamps: Map<string, string | null>;
+  /** Wall-clock epoch ms taken before the first project was loaded. */
+  loadStartedMs: number;
+  /** Stamped project files that exist and were written at or after `loadStartedMs` (possibly read half-written). */
+  changedDuringLoad: string[];
 };
 
 const PACKAGE_FILES = ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"];
@@ -363,7 +367,16 @@ export function loadSolution(
   registry: ts.DocumentRegistry = ts.createDocumentRegistry(ts.sys.useCaseSensitiveFileNames),
 ): LoadedSolution {
   const started = performance.now();
+  const loadStartedMs = Date.now();
   const projects = solution.projects.map((path) => loadProject(path, registry));
+  const projectStamps = stampProjectFiles(solution, projects);
+  const changedDuringLoad = projectFilePaths(solution, projects).filter((path) => {
+    try {
+      return statSync(path).mtimeMs >= loadStartedMs;
+    } catch {
+      return false;
+    }
+  });
   return {
     name: solution.name,
     path: solution.path,
@@ -379,7 +392,9 @@ export function loadSolution(
     },
     unresolvedImports: projects.reduce((sum, p) => sum + p.unresolvedImports, 0),
     loadMs: Math.round(performance.now() - started),
-    projectStamps: stampProjectFiles(solution, projects),
+    projectStamps,
+    loadStartedMs,
+    changedDuringLoad,
   };
 }
 
