@@ -351,6 +351,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         warmUp.current = solution.name;
         try {
           if (!manager.isRegistered(solution.path) || manager.peekSolution(solution.path) !== null) return;
+          if (!existsSync(solution.path)) return;
           loadIndexUnload(solution.path);
           await recordHead(ctx, solution);
           warmUp.warmed++;
@@ -385,6 +386,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         queued.delete(key);
         pending.take(solution.path);
         if (!manager.isRegistered(solution.path) || manager.peekSolution(solution.path) !== null) return;
+        if (!existsSync(solution.path)) return;
         if (isFresh(store, solution, { ignoredFolders: config.ignoredFolders })) {
           await recordHead(ctx, solution);
           return;

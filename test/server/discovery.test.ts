@@ -125,6 +125,38 @@ test("a queued load job does not bring a forgotten solution back", async () => {
   rmSync(dirname(path), { recursive: true, force: true, maxRetries: 5 });
 });
 
+test("a load job for a registered solution whose folder was deleted loads nothing and logs no failure", async () => {
+  const warnings: string[] = [];
+  const own = await startServer({
+    roots: [fixture.root], preload: [], warmUp: false, port: 0, indexPath: ":memory:", debounceMs: 100,
+    discoverySweepSeconds: 0, unloadedRefreshSeconds: 0, unloadedRefreshMaxWaitSeconds: 0, watch: false,
+    warn: (m: string) => void warnings.push(m),
+  });
+  try {
+    const path = writeApp("ghostjob", "GhostJob");
+    own.manager.register(path);
+    own.manager.unload(path);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    void own.jobs.enqueue("blocker", () => gate);
+    const response = await fetch(`http://127.0.0.1:${own.port}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: nextId++, method: "tools/call", params: { name: "reindex", arguments: { solution: "ghostjob" } },
+      }),
+    });
+    assert.match((await response.json()).result.content[0].text, /was not loaded; load started/);
+    rmSync(dirname(path), { recursive: true, force: true, maxRetries: 5 });
+    release();
+    await own.jobs.idle();
+    assert.equal(own.manager.resolveSolution("ghostjob"), null);
+    assert.ok(!warnings.some((w) => w.includes("failed")), warnings.join("\n"));
+  } finally {
+    await own.close();
+  }
+});
+
 test("a new tsconfig that an existing solution already references is not registered separately", async () => {
   const dir = fixture.path("refmono");
   mkdirSync(dir, { recursive: true });

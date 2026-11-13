@@ -104,13 +104,21 @@ export function forgetMissing(
 ): string[] {
   const names: string[] = [];
   for (const solution of manager.solutions) {
-    if (existsSync(solution.path)) continue;
-    const forgotten = forgetSolution(manager, store, pending, solution.path);
-    if (!forgotten || "ambiguous" in forgotten) continue;
-    names.push(solution.name);
-    warn(`domra: forgot ${solution.name} (${solution.path}): tsconfig is gone, ${forgotten.projectsRemoved} projects removed from the index`);
+    if (forgetIfMissing(manager, store, pending, warn, solution)) names.push(solution.name);
   }
   return names;
+}
+
+/** Forget one solution whose tsconfig no longer exists and log it; false when the file exists or nothing was forgotten. */
+function forgetIfMissing(
+  manager: WorkspaceManager, store: IndexStore, pending: PendingRefreshes | null, warn: (message: string) => void,
+  solution: { name: string; path: string },
+): boolean {
+  if (existsSync(solution.path)) return false;
+  const forgotten = forgetSolution(manager, store, pending, solution.path);
+  if (!forgotten || "ambiguous" in forgotten) return false;
+  warn(`domra: forgot ${solution.name} (${solution.path}): tsconfig is gone, ${forgotten.projectsRemoved} projects removed from the index`);
+  return true;
 }
 
 /** Whether a tsconfig.json path is discoverable like `discoverSolutions` would: under a root, depth <= 6, no ignored segment. */
@@ -440,6 +448,10 @@ export function applyChanges(ctx: ApplyContext, batch: ChangeBatch): ApplyReport
     }
     for (const solution of loaded) {
       if (!projectFilesChanged(solution)) continue;
+      if (forgetIfMissing(ctx.manager, ctx.store, ctx.pending, ctx.warn, solution)) {
+        report.forgotten.push(solution.name);
+        continue;
+      }
       const started = performance.now();
       const reloaded = ctx.manager.reload(solution.path);
       indexSolution(ctx.store, reloaded, { ignoredFolders: ctx.ignoredFolders });
@@ -463,6 +475,10 @@ export function applyChanges(ctx: ApplyContext, batch: ChangeBatch): ApplyReport
       touch(solution, path);
     } else if (!reloadedKeys.has(key)) {
       reloadedKeys.add(key);
+      if (forgetIfMissing(ctx.manager, ctx.store, ctx.pending, ctx.warn, solution)) {
+        report.forgotten.push(solution.name);
+        continue;
+      }
       const started = performance.now();
       const loaded = ctx.manager.reload(solution.path);
       indexSolution(ctx.store, loaded, { ignoredFolders: ctx.ignoredFolders });

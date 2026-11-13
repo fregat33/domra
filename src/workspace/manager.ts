@@ -117,6 +117,7 @@ export class WorkspaceManager {
       this.lastUsed.set(key, this.now());
       return existing;
     }
+    if (!existsSync(solution.path)) throw new Error(`unknown solution: ${hint}`);
     let result: LoadedSolution;
     try {
       result = loadSolution(solution, this.registry);
