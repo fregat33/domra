@@ -4,6 +4,7 @@
 
 ### Fixed
 - A solution whose tsconfig vanished (a removed worktree) is forgotten instead of reloaded or loaded as an empty solution.
+- A solution whose project files were written while it was loading is loaded once more, so a half-written file no longer leaves a broken program.
 
 ## 0.2.0 - 2026-11-01
 

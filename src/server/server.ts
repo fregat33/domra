@@ -301,6 +301,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     logFile.write(message);
   };
   const manager = new WorkspaceManager({ roots: config.roots, ignoredFolders: config.ignoredFolders });
+  manager.onWarn = warn;
   if (options.now) manager.now = options.now;
   manager.discover();
   const store = IndexStore.open(config.indexPath ?? defaultIndexPath());
