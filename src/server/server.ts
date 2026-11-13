@@ -451,6 +451,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
               if (repoKeys.some((root) => dir === root || dir.startsWith(`${root}/`))) enqueueRefresh(solution.path);
             }
           }
+          for (const path of report.discovered) enqueueRefresh(path);
         });
       },
     });

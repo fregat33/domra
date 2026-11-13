@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- A solution discovered by the running daemon (a new tsconfig, for example in a fresh worktree) is indexed in the background and gets its head, instead of staying `registered  head -`.
 - A solution whose tsconfig vanished (a removed worktree) is forgotten instead of reloaded or loaded as an empty solution.
 - A solution whose project files were written while it was loading is loaded once more, so a half-written file no longer leaves a broken program.
 
