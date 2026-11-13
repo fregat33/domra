@@ -25,3 +25,15 @@ Feature parity with balalaika.
 
 ### Fixed
 - A recreated worktree gets its HEAD watched again.
+
+## 0.1.0 - 2026-10-21
+
+### Added
+- A TypeScript MCP server that keeps solutions loaded in a daemon, with live and indexed symbol queries.
+- Find references, implementations and derived types across repositories, through the published package that carries a shared type.
+- Go to definition, from a package's `.d.ts` declaration to its source.
+- Symbol info, members, outlines, call graph and symbol search.
+- Compiler diagnostics without a build, and a post-edit diagnostics hook.
+- Change review against a git ref, and a report of package version drift.
+- A content-addressed SQLite index with warm-up, kept current by a file watcher.
+- A command-line interface for the same queries.
