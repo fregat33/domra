@@ -6,7 +6,7 @@ import type { DomraConfig } from "../config.ts";
 import { DEFAULT_CONFIG } from "../config.ts";
 import { defaultIndexPath, IndexStore } from "../index/index.ts";
 import type { GitProvider } from "../workspace/index.ts";
-import { createGit, indexSolution, isFresh, pathKey, WorkspaceManager } from "../workspace/index.ts";
+import { createGit, indexSolution, indexTimingLine, isFresh, pathKey, WorkspaceManager } from "../workspace/index.ts";
 import type { ChangeBatch } from "../watcher/debounce.ts";
 import { applyChanges, classifyChange, forgetMissing, PendingRefreshes, RepoWatcher } from "../watcher/index.ts";
 import { checkArguments } from "./arguments.ts";
@@ -18,6 +18,8 @@ import { Pager } from "./pager.ts";
 import { preloadSolutions, TOOLS } from "./tools.ts";
 import type { ToolContext } from "./tools.ts";
 import { enqueueIndex, pinnedKeys, recordHead, statusText } from "./status.ts";
+import type { StatusContext } from "./status.ts";
+import { StallMonitor } from "./stalls.ts";
 import { openView, Slots } from "./view.ts";
 
 /** `git` replaces the git provider built from `gitPath` (tests inject a fake). */
@@ -28,6 +30,8 @@ export type ServerOptions = Partial<DomraConfig> & {
   now?: () => number;
   /** Period of the idle eviction timer in ms (default and maximum rate: once a minute). */
   idleCheckMs?: number;
+  /** Thresholds and tick of the event loop stall monitor in ms (tests; not config keys). */
+  stalls?: { warnMs?: number; longMs?: number; intervalMs?: number };
 };
 
 export type RunningServer = {
@@ -92,6 +96,7 @@ type CallEnv = {
   parts: string[];
   sessionId: string | undefined;
   clients: Clients;
+  stalls?: StallMonitor;
 };
 
 /** `clientInfo` of `initialize`: by `mcp-session-id` when the request carries one, else the last one seen. */
@@ -147,6 +152,7 @@ async function callTool(params: unknown, opened: Opened, env: CallEnv): Promise<
     return fail(checked.text);
   }
   try {
+    env.stalls?.mark(`tool ${tool!.name}`);
     const result = { content: [{ type: "text", text: await tool!.handler(checked.args, opened.ctx) }] };
     log(result);
     return result;
@@ -264,7 +270,7 @@ export function refusedOrigin(headers: IncomingMessage["headers"], allowedOrigin
 }
 
 async function route(
-  request: IncomingMessage, ctx: ToolContext, allowedOrigins: readonly string[], warn: (message: string) => void, clients: Clients,
+  request: IncomingMessage, ctx: StatusContext, allowedOrigins: readonly string[], warn: (message: string) => void, clients: Clients,
 ): Promise<Reply> {
   const refused = refusedOrigin(request.headers, allowedOrigins);
   if (refused) return text(403, refused);
@@ -275,7 +281,7 @@ async function route(
     const header = request.headers["mcp-session-id"];
     const parts = url.searchParams.getAll("part").filter((p) => p.trim() !== "");
     const env: CallEnv = {
-      warn, caller: callerOf(url.searchParams.getAll("caller")), parts, clients,
+      warn, caller: callerOf(url.searchParams.getAll("caller")), parts, clients, stalls: ctx.stalls,
       sessionId: typeof header === "string" && header !== "" ? header : undefined,
     };
     return handleMessage(await readBody(request), opened(), env);
@@ -312,7 +318,12 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
   }
   const jobs = new JobQueue(warn);
   const warmUp: WarmUpState = { ran: false, total: 0, done: 0, current: null, warmed: 0, fresh: 0 };
-  const ctx: ToolContext = {
+  const optionNow = options.now;
+  const stalls = new StallMonitor({ warn, ...options.stalls, ...(optionNow ? { now: () => new Date(optionNow()) } : {}) });
+  stalls.start();
+  jobs.onStart = (name) => stalls.mark(name);
+  const ctx: StatusContext = {
+    stalls, warn,
     manager, pager: new Pager(), defaultSolution: config.defaultSolution, store, jobs, warmUp,
     ignoredFolders: config.ignoredFolders, watcher: null, pending: null, changes: { batches: 0, lastBatch: null },
     git: options.git ?? createGit(config.gitPath), heads: new Map(), slots: new Slots(config.gitPath, manager),
@@ -320,6 +331,11 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
   };
   let warming = false;
   manager.onLoad = (solution) => {
+    try {
+      warn(`domra: ${solution.name}: load ${Math.round(solution.loadMs)}ms`);
+    } catch {
+      // a log failure never fails the load
+    }
     if (!warming) enqueueIndex(ctx, solution);
   };
   /** Load a solution without the automatic index job, index it, and unload it again. */
@@ -331,7 +347,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     } finally {
       warming = false;
     }
-    indexSolution(store, loaded, { ignoredFolders: config.ignoredFolders });
+    warn(indexTimingLine(loaded.name, indexSolution(store, loaded, { ignoredFolders: config.ignoredFolders })));
     manager.unload(path);
   };
   const names = [...config.preload];
@@ -538,6 +554,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     pending: ctx.pending,
     evictsIdle: evictionTimer !== null,
     close: async () => {
+      stalls.stop();
       if (evictionTimer) clearInterval(evictionTimer);
       if (refreshTimer) clearInterval(refreshTimer);
       if (sweepTimer) clearInterval(sweepTimer);

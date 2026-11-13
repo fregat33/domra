@@ -117,6 +117,11 @@ function ensureProject(store: IndexStore, project: LoadedProject, solution: Load
   });
 }
 
+/** The log line of one finished `indexSolution`. */
+export function indexTimingLine(name: string, report: IndexReport): string {
+  return `domra: ${name}: index ${Math.round(report.elapsedMs)}ms, ${report.documentsVisited} documents`;
+}
+
 /** Index every document of a loaded solution, reusing blobs of unchanged content. One transaction per project. */
 export function indexSolution(store: IndexStore, solution: LoadedSolution, options: IndexOptions = {}): IndexReport {
   const started = performance.now();

@@ -1,6 +1,8 @@
 import { existsSync } from "node:fs";
 import type { WorkspaceManager } from "../workspace/index.ts";
-import { indexSolution, pathKey } from "../workspace/index.ts";
+import { indexSolution, indexTimingLine, pathKey } from "../workspace/index.ts";
+import { clock } from "./stalls.ts";
+import type { StallMonitor } from "./stalls.ts";
 import { formatStats } from "../index/index.ts";
 import { forgetSolution } from "../watcher/index.ts";
 import type { ToolContext } from "./tools.ts";
@@ -12,11 +14,8 @@ function seconds(ms: number | null): string {
   return ((ms ?? 0) / 1000).toFixed(1);
 }
 
-const pad = (n: number): string => String(n).padStart(2, "0");
-
-function clock(at: Date): string {
-  return `${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}`;
-}
+/** The tool context plus what only the running server sets: the stall monitor and the log sink. */
+export type StatusContext = ToolContext & { stalls?: StallMonitor; warn?: (message: string) => void };
 
 function warmUpText(ctx: ToolContext): string {
   const warm = ctx.warmUp;
@@ -92,12 +91,13 @@ export async function recordHead(ctx: ToolContext, solution: { path: string; dir
  * Process memory, index counts, job queue, warm-up progress and one line per known solution, sorted by path.
  * Index counts, the unloaded-refresh line and the solution rows follow the view; the other lines are global.
  */
-export function statusText(ctx: ToolContext): string {
+export function statusText(ctx: StatusContext): string {
   const memory = process.memoryUsage();
   let text = `Process: ${Math.round(memory.rss / MB)} MB RSS, heap ${Math.round(memory.heapUsed / MB)} MB\n`;
   text += `Index: ${ctx.store.path}\n  ${formatStats(ctx.store.stats())}\n`;
   const last = ctx.jobs.lastCompleted;
   text += `Jobs: ${ctx.jobs.pending} pending${last ? `, last completed ${clock(last.at)} ${last.name}` : ""}\n`;
+  if (ctx.stalls) text += `${ctx.stalls.line()}\n`;
   text += watcherText(ctx);
   text += readyText(ctx);
   text += gitText(ctx);
@@ -137,11 +137,12 @@ export function forgetSolutionText(ctx: ToolContext, hint: string): string {
 }
 
 /** Queue `index {solution}` for a loaded solution; skipped when it was unloaded meanwhile. */
-export function enqueueIndex(ctx: ToolContext, solution: { name: string; path: string }, force = false): void {
+export function enqueueIndex(ctx: StatusContext, solution: { name: string; path: string }, force = false): void {
   void ctx.jobs.enqueue(`index ${solution.name}`, async () => {
     const loaded = ctx.manager.peekSolution(solution.path);
     if (!loaded) return;
-    indexSolution(ctx.store, loaded, { force, ignoredFolders: ctx.ignoredFolders });
+    const report = indexSolution(ctx.store, loaded, { force, ignoredFolders: ctx.ignoredFolders });
+    ctx.warn?.(indexTimingLine(solution.name, report));
     await recordHead(ctx, loaded);
   });
 }

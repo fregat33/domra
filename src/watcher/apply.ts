@@ -3,7 +3,7 @@ import { basename } from "node:path";
 import type { IndexStore } from "../index/index.ts";
 import type { DiscoveredSolution, LoadedProject, LoadedSolution, WorkspaceManager } from "../workspace/index.ts";
 import {
-  addRootFile, adoptRootFile, clearPackageCache, describeSolution, discoverSolutions, indexDocuments, indexSolution, MAX_DISCOVERY_DEPTH, normalizePath,
+  addRootFile, adoptRootFile, clearPackageCache, describeSolution, discoverSolutions, indexDocuments, indexSolution, indexTimingLine, MAX_DISCOVERY_DEPTH, normalizePath,
   packageNameOf, pathKey, projectFileList, projectFilesChanged, readReferences, reextractProjects, referencingProjects, removeDocument, removeRootFile,
   withTransitiveDependents,
 } from "../workspace/index.ts";
@@ -454,7 +454,7 @@ export function applyChanges(ctx: ApplyContext, batch: ChangeBatch): ApplyReport
       }
       const started = performance.now();
       const reloaded = ctx.manager.reload(solution.path);
-      indexSolution(ctx.store, reloaded, { ignoredFolders: ctx.ignoredFolders });
+      ctx.warn(indexTimingLine(reloaded.name, indexSolution(ctx.store, reloaded, { ignoredFolders: ctx.ignoredFolders })));
       report.reloaded.push(reloaded.name);
       reloadedKeys.add(pathKey(solution.path));
       ctx.warn(`domra: ${reloaded.name}: project file changed, reloaded in ${Math.round(performance.now() - started)}ms`);
@@ -481,7 +481,7 @@ export function applyChanges(ctx: ApplyContext, batch: ChangeBatch): ApplyReport
       }
       const started = performance.now();
       const loaded = ctx.manager.reload(solution.path);
-      indexSolution(ctx.store, loaded, { ignoredFolders: ctx.ignoredFolders });
+      ctx.warn(indexTimingLine(loaded.name, indexSolution(ctx.store, loaded, { ignoredFolders: ctx.ignoredFolders })));
       report.reloaded.push(loaded.name);
       ctx.warn(`domra: ${loaded.name}: project file changed, reloaded in ${Math.round(performance.now() - started)}ms`);
     }

@@ -11,6 +11,8 @@ export class JobQueue {
   private unfinished = 0;
   private completed: { name: string; at: Date } | null = null;
   private readonly warn: (message: string) => void;
+  /** Called with `job {name}` before a job runs (the stall monitor). */
+  onStart: ((name: string) => void) | null = null;
 
   constructor(warn: (message: string) => void = () => undefined) {
     this.warn = warn;
@@ -50,6 +52,7 @@ export class JobQueue {
     const job = this.queue.shift()!;
     let result: void | Promise<void>;
     try {
+      this.onStart?.(`job ${job.name}`);
       result = job.run();
     } catch (error) {
       this.fail(job, error);
