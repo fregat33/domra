@@ -6,6 +6,9 @@
 - A `Stalls:` line in `status` and a `WARN` log line when the event loop of the daemon was blocked for 3 s or more, with the tool calls and jobs that ran.
 - Separate log lines for the load time and the index time of each solution.
 
+### Changed
+- `get_outline` of a file prints only the property count of an interface or type literal with more than 8 properties (`  N properties omitted`, and the count in the footer); a type target still lists them all.
+
 ### Fixed
 - A solution discovered by the running daemon (a new tsconfig, for example in a fresh worktree) is indexed in the background and gets its head, instead of staying `registered  head -`.
 - A solution whose tsconfig vanished (a removed worktree) is forgotten instead of reloaded or loaded as an empty solution.

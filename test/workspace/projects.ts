@@ -325,3 +325,31 @@ export class C implements A { f(): void {} }
 export function g(x: B | C, a: A): void { x.f(); a.f(); }
 `,
 };
+
+const props = (n: number, indent: string): string =>
+  Array.from({ length: n }, (_, i) => `${indent}p${i + 1}: number;`).join("\n");
+
+export const OMIT_MODELS_TS = `export interface Wide {
+${props(9, "  ")}
+  run(): void;
+}
+export interface Edge {
+${props(8, "  ")}
+}
+export type Literal = {
+${props(10, "  ")}
+};
+export class Model {
+${Array.from({ length: 9 }, (_, i) => `  f${i + 1} = ${i};`).join("\n")}
+}
+export enum Many {
+${Array.from({ length: 9 }, (_, i) => `  M${i + 1},`).join("\n")}
+}
+`;
+
+/** Solution `omit`: one file of data shapes, with interfaces and a type literal of 8, 9 and 10 properties. */
+export const OMIT: FixtureFiles = {
+  "omit/tsconfig.json": { compilerOptions, include: ["src"] },
+  "omit/package.json": { name: "omit-pkg", version: "1.0.0" },
+  "omit/src/models.ts": OMIT_MODELS_TS,
+};

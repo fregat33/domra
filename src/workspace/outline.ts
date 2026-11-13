@@ -18,8 +18,18 @@ export type OutlineOptions = ResolveInSolutionOptions & {
   includePrivate?: boolean;
 };
 
-type Entry = { node: ts.Node; span: ts.Node; nesting: number };
-type Walk = { max: number; includePrivate: boolean; checker: ts.TypeChecker; out: Entry[] };
+type Entry = { node: ts.Node; span: ts.Node; nesting: number; omitted?: number };
+type Walk = { max: number; includePrivate: boolean; checker: ts.TypeChecker; out: Entry[]; omitProperties?: boolean };
+
+/** An interface or type literal with more properties than this lists none of them in a file outline. */
+export const MAX_LISTED_PROPERTIES = 8;
+
+/** Suffix of a type line whose properties are not listed. */
+export const omittedSuffix = (count: number): string => `  ${count} properties omitted`;
+
+/** Footer of an outline in which at least one property was omitted. */
+export const omittedFooter = (listed: number, omitted: number): string =>
+  `Total: ${listed} declarations, ${omitted} properties omitted (read the line span, or get_outline with the type name)`;
 
 const FILE_TARGET = /\.(ts|tsx|mts|cts|js|jsx)$/i;
 const collapse = (text: string): string => text.replace(/\s+/g, " ").trim();
@@ -79,8 +89,18 @@ function declare(node: ts.Node, nesting: number, walk: Walk, force = false): voi
 
 function addEntry(node: ts.Node, span: ts.Node, nesting: number, walk: Walk, force: boolean): void {
   if (!force && !walk.includePrivate && accessibilityText(node, span) === "private") return;
-  walk.out.push({ node, span, nesting });
-  if (nesting < walk.max) for (const child of childrenOf(node)) declare(child, nesting + 1, walk);
+  const entry: Entry = { node, span, nesting };
+  walk.out.push(entry);
+  if (nesting >= walk.max) return;
+  let children = childrenOf(node);
+  if (walk.omitProperties && (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node))) {
+    const properties = children.filter((c) => ts.isPropertySignature(c));
+    if (properties.length > MAX_LISTED_PROPERTIES) {
+      entry.omitted = properties.length;
+      children = children.filter((c) => !ts.isPropertySignature(c));
+    }
+  }
+  for (const child of children) declare(child, nesting + 1, walk);
 }
 
 // ---- entry text -----------------------------------------------------------------------------
@@ -122,7 +142,8 @@ function entryLine(entry: Entry, checker: ts.TypeChecker): string {
   if (decorators.length > 0) text += `  ${decorators.map(decoratorText).join(" ")}`;
   const start = sourceFile.getLineAndCharacterOfPosition(span.getStart(sourceFile)).line + 1;
   const end = sourceFile.getLineAndCharacterOfPosition(span.getEnd()).line + 1;
-  return `${" ".repeat(2 + nesting * 2)}${text}  ${start === end ? start : `${start}-${end}`}`;
+  const suffix = entry.omitted ? omittedSuffix(entry.omitted) : "";
+  return `${" ".repeat(2 + nesting * 2)}${text}  ${start === end ? start : `${start}-${end}`}${suffix}`;
 }
 
 // ---- targets --------------------------------------------------------------------------------
@@ -149,13 +170,14 @@ function fileOutline(solution: LoadedSolution, target: string, depth: number, in
       : `File not found: ${target}. Pass an absolute path, or a path relative to a solution directory.`;
     return { head: [head], items: [], label: label(path) };
   }
-  const walk: Walk = { max: depth - 1, includePrivate, checker: file.checker, out: [] };
+  const walk: Walk = { max: depth - 1, includePrivate, checker: file.checker, out: [], omitProperties: true };
   for (const statement of file.sourceFile.statements) declare(statement, 0, walk);
+  const omitted = walk.out.reduce((sum, e) => sum + (e.omitted ?? 0), 0);
   return {
     head: [`Outline: ${path}  (Live ${solution.name}, ${projects.map((p) => p.name).join(", ")})`],
     items: walk.out.map((e) => entryLine(e, file.checker)),
     label: label(path),
-    footer: `Total: ${walk.out.length} declarations`,
+    footer: omitted > 0 ? omittedFooter(walk.out.length, omitted) : `Total: ${walk.out.length} declarations`,
   };
 }
 

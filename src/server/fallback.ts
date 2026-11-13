@@ -3,7 +3,8 @@ import type { IndexStore, ReferenceScope, RelationHit, SymbolHit } from "../inde
 import { parseDocId, TOP_LEVEL } from "../index/index.ts";
 import type { Filters, GroupedText, LoadedSolution, QueryText, WorkspaceManager } from "../workspace/index.ts";
 import {
-  describeFilters, docIdOf, findInSolution, formatNotFound, isStale, normalizePath, pathKey, resolveTargets,
+  describeFilters, docIdOf, findInSolution, formatNotFound, isStale, MAX_LISTED_PROPERTIES, normalizePath, omittedFooter,
+  omittedSuffix, pathKey, resolveTargets,
 } from "../workspace/index.ts";
 import { driftTagFor } from "./drift.ts";
 import { isNotFound } from "./select.ts";
@@ -253,15 +254,32 @@ export function indexOutline(
     const items: string[] = [];
     const hidden = new Set<string>();
     const depth = Math.min(3, Math.max(1, Math.trunc(options.depth) || 2));
+    const propertyCount = new Map<string, number>();
+    for (const row of rows) {
+      const parent = row.containingDocId !== null ? byId.get(row.containingDocId) : undefined;
+      if (row.kind === "property" && parent && (parent.kind === "interface" || parent.kind === "typeAlias")) {
+        propertyCount.set(parent.docId, (propertyCount.get(parent.docId) ?? 0) + 1);
+      }
+    }
+    const omittedBy = (docId: string): number => {
+      const count = propertyCount.get(docId) ?? 0;
+      return count > MAX_LISTED_PROPERTIES ? count : 0;
+    };
+    let omitted = 0;
     for (const row of rows) {
       let nesting = 0;
       for (let p = row.containingDocId; p !== null && byId.has(p) && nesting < 10; p = byId.get(p)!.containingDocId) nesting++;
       if (row.containingDocId !== null && hidden.has(row.containingDocId)) hidden.add(row.docId);
       else if (!options.includePrivate && row.accessibility === "private") hidden.add(row.docId);
       if (hidden.has(row.docId) || nesting > depth - 1) continue;
+      const parent = row.containingDocId !== null ? byId.get(row.containingDocId) : undefined;
+      if (row.kind === "property" && parent && omittedBy(parent.docId) > 0) continue;
       const access = row.accessibility === "private" || row.accessibility === "protected" ? `${row.accessibility} ` : "";
       const span = row.endLine > row.line ? `${row.line}-${row.endLine}` : `${row.line}`;
-      items.push(`${" ".repeat(2 + nesting * 2)}${access}${row.kind} ${row.signature}  ${span}`);
+      // at depth 1 no member is listed, so nothing is omitted
+      const count = nesting < depth - 1 ? omittedBy(row.docId) : 0;
+      omitted += count;
+      items.push(`${" ".repeat(2 + nesting * 2)}${access}${row.kind} ${row.signature}  ${span}${count > 0 ? omittedSuffix(count) : ""}`);
     }
     const stale = isStale(first.document) ? "; [stale: file changed since indexed]" : "";
     return {
@@ -270,7 +288,7 @@ export function indexOutline(
       ],
       items,
       label: `get_outline ${path}`,
-      footer: `Total: ${items.length} declarations`,
+      footer: omitted > 0 ? omittedFooter(items.length, omitted) : `Total: ${items.length} declarations`,
     };
   }
   return null;

@@ -417,7 +417,7 @@ export const TOOLS: ToolDefinition[] = [
   {
     name: "get_outline",
     description:
-      "Map of a file or a type without reading it: one line per declaration in source order, indented by nesting, with kind, compact signature, decorators and the line span. Call it before reading a file longer than about 100 lines, then read only the span you need.",
+      "Map of a file or a type without reading it: one line per declaration in source order, indented by nesting, with kind, compact signature, decorators and the line span. Call it before reading a file longer than about 100 lines, then read only the span you need. An interface or type literal with more than 8 properties prints its property count only; read its line span, or pass the type name as target.",
     inputSchema: schema(
       {
         target: {

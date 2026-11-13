@@ -37,7 +37,7 @@ export { reviewChangesText } from "./review.ts";
 export type { ListMembersOptions } from "./queries.ts";
 export { DEFAULT_LIMIT, definition, listMembers, symbolInfo } from "./queries.ts";
 export type { OutlineOptions } from "./outline.ts";
-export { outline } from "./outline.ts";
+export { MAX_LISTED_PROPERTIES, omittedFooter, omittedSuffix, outline } from "./outline.ts";
 export type { FoundSymbol, ResolvedSymbol } from "./resolver.ts";
 export { findInSolution, resolveInSolution, toResolved } from "./resolver.ts";
 export type { SearchHit, SearchResult } from "./search.ts";
