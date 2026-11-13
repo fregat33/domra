@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- A solution whose tsconfig vanished (a removed worktree) is forgotten instead of reloaded or loaded as an empty solution.
+
 ## 0.2.0 - 2026-11-01
 
 Feature parity with balalaika.

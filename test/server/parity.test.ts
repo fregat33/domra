@@ -1,5 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { IndexStore } from "../../src/index/index.ts";
@@ -126,6 +128,7 @@ function bareContext(manager: WorkspaceManager, failed?: string[]): ToolContext 
 test("Warm-up line counts failures only when there are some; a failed load puts error: on its row", () => {
   const manager = new WorkspaceManager();
   const none = bareContext(manager, []);
+  let cleanup = "";
   try {
     assert.match(statusText(none), /^Warm-up: done, 0 warmed, 1 already fresh$/m);
     const two = bareContext(manager, ["a", "b"]);
@@ -135,18 +138,26 @@ test("Warm-up line counts failures only when there are some; a failed load puts 
     assert.match(statusText(one), /^Warm-up: done, 0 warmed, 1 already fresh, 1 failed \(a\)$/m);
     one.store.close();
 
-    manager.register({ name: "broken", path: "C:/nowhere/broken/tsconfig.json", dir: "C:/nowhere/broken", projects: [null as never] });
+    // The tsconfig must exist: a load of a gone one is refused as an unknown solution (no load error is recorded).
+    cleanup = mkdtempSync(join(tmpdir(), "domra-broken-"));
+    const dir = join(cleanup, "broken").replace(/\\/g, "/");
+    mkdirSync(dir);
+    writeFileSync(`${dir}/tsconfig.json`, "{}");
+    manager.register({ name: "broken", path: `${dir}/tsconfig.json`, dir, projects: [null as never] });
     assert.throws(() => manager.load("broken"));
     assert.match(statusText(none), /^ {2}broken {2}registered {2}head - {2}\S+broken\/tsconfig\.json {2}error: .+$/m);
     assert.equal(statusText(none).split("\n").filter((l) => l.includes("error:")).length, 1);
   } finally {
     none.store.close();
+    if (cleanup) rmSync(cleanup, { recursive: true, force: true });
   }
 });
 
 test("a failed load shows error: in the status of the running server", async () => {
   const s = await start({ watch: false, warmUp: false }, { ...SINGLE });
   try {
+    mkdirSync(s.fixture.path("broken"), { recursive: true });
+    writeFileSync(s.fixture.path("broken/tsconfig.json"), "{}");
     s.server.manager.register({ name: "broken", path: s.fixture.path("broken/tsconfig.json"), dir: s.fixture.path("broken"), projects: [null as never] });
     const failure = await call(s, "load_solution", { solution: "broken" });
     assert.match(failure, /failed/);

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import type { WorkspaceManager } from "../workspace/index.ts";
 import { indexSolution, pathKey } from "../workspace/index.ts";
 import { formatStats } from "../index/index.ts";
@@ -164,7 +165,7 @@ export function reindexText(ctx: ToolContext, rawHint: string | undefined, force
   const registered = ctx.manager.findRegistered(hint);
   if (registered === null) return unknownSolutionText(ctx.manager, hint);
   void ctx.jobs.enqueue(`load ${registered.name}`, () => {
-    if (!ctx.manager.isRegistered(registered.path)) return;
+    if (!ctx.manager.isRegistered(registered.path) || !existsSync(registered.path)) return;
     ctx.manager.load(registered.path);
     if (force) enqueueIndex(ctx, registered, true);
   });
