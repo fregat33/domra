@@ -288,7 +288,7 @@ export const TOOLS: ToolDefinition[] = [
   },
   {
     name: "load_solution",
-    description: "Load a solution into memory so that live queries are available for it.",
+    description: "Load a solution into memory so that live queries are available for it. With rootsOnly on, a tsconfig path outside the roots is refused.",
     inputSchema: schema(
       { solution: { type: "string", description: "Solution (tsconfig directory name) to load." } },
       ["solution"],

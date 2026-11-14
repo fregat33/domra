@@ -37,6 +37,26 @@ test("config merges domra.json, domra.local.json and DOMRA_* env in order", () =
   }
 });
 
+test("rootsOnly defaults to false and reads json and env", () => {
+  const dir = mkdtempSync(join(tmpdir(), "domra-config-"));
+  const saved = process.env.DOMRA_ROOTS_ONLY;
+  try {
+    delete process.env.DOMRA_ROOTS_ONLY;
+    assert.equal(loadConfig(dir).rootsOnly, false);
+    writeFileSync(join(dir, "domra.local.json"), JSON.stringify({ rootsOnly: true }));
+    assert.equal(loadConfig(dir).rootsOnly, true);
+    rmSync(join(dir, "domra.local.json"));
+    process.env.DOMRA_ROOTS_ONLY = "true";
+    assert.equal(loadConfig(dir).rootsOnly, true);
+    process.env.DOMRA_ROOTS_ONLY = "maybe";
+    assert.throws(() => loadConfig(dir), /DOMRA_ROOTS_ONLY/);
+  } finally {
+    if (saved === undefined) delete process.env.DOMRA_ROOTS_ONLY;
+    else process.env.DOMRA_ROOTS_ONLY = saved;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("watcher config defaults and env overrides", () => {
   const dir = mkdtempSync(join(tmpdir(), "domra-config-"));
   const keys = [

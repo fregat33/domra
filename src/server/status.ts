@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import type { WorkspaceManager } from "../workspace/index.ts";
-import { indexSolution, indexTimingLine, pathKey } from "../workspace/index.ts";
+import { indexSolution, indexTimingLine, normalizePath, pathKey } from "../workspace/index.ts";
 import { clock } from "./stalls.ts";
 import type { StallMonitor } from "./stalls.ts";
 import { formatStats } from "../index/index.ts";
@@ -117,6 +117,9 @@ export function statusText(ctx: StatusContext): string {
 }
 
 export function loadSolutionText(manager: WorkspaceManager, hint: string): string {
+  if (manager.refusesOutsideRoots(hint)) {
+    return `Outside the roots: ${normalizePath(hint)}. rootsOnly is on: this server registers solutions only under its roots.`;
+  }
   const solution = loadHinted(manager, hint);
   if (solution === null) return unknownSolutionText(manager, hint);
   return `${solution.name}: ${solution.projects.length} projects loaded in ${seconds(solution.loadMs)}s, ${solution.unresolvedImports} unresolved imports.`;

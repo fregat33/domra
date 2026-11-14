@@ -64,7 +64,7 @@ function fileNames(paths: readonly string[]): string {
 
 /** Registered and loaded solutions; loading order is preserved for resolution. */
 export class WorkspaceManager {
-  private readonly config: Pick<DomraConfig, "roots" | "ignoredFolders">;
+  private readonly config: Pick<DomraConfig, "roots" | "ignoredFolders" | "rootsOnly">;
   private readonly registered = new Map<string, DiscoveredSolution>();
   private readonly loaded = new Map<string, LoadedSolution>();
   private readonly registry = ts.createDocumentRegistry(ts.sys.useCaseSensitiveFileNames);
@@ -86,11 +86,27 @@ export class WorkspaceManager {
   /** Called after a solution was registered (also when it replaces an earlier registration of the same path). */
   onRegister: ((solution: DiscoveredSolution) => void) | null = null;
 
-  constructor(config: Partial<Pick<DomraConfig, "roots" | "ignoredFolders">> = {}) {
+  constructor(config: Partial<Pick<DomraConfig, "roots" | "ignoredFolders" | "rootsOnly">> = {}) {
     this.config = {
       roots: config.roots ?? DEFAULT_CONFIG.roots,
       ignoredFolders: config.ignoredFolders ?? DEFAULT_CONFIG.ignoredFolders,
+      rootsOnly: config.rootsOnly ?? DEFAULT_CONFIG.rootsOnly,
     };
+  }
+
+  /**
+   * True when `rootsOnly` is on and the hint is an existing, unregistered `.json` path under none of the roots:
+   * loading it would register it, which is refused.
+   */
+  refusesOutsideRoots(hint: string): boolean {
+    if (!this.config.rootsOnly) return false;
+    if (!hint.toLowerCase().endsWith(".json") || !existsSync(hint)) return false;
+    const key = pathKey(hint);
+    if (this.registered.has(key)) return false;
+    return !this.config.roots.some((root) => {
+      if (root.trim() === "") return false;
+      return key.startsWith(`${pathKey(root)}/`);
+    });
   }
 
   /** Discover solutions under the configured roots and register them. */
@@ -119,6 +135,7 @@ export class WorkspaceManager {
   /** Load a registered solution by path, name or name substring (registering a path if needed). */
   load(hint: string): LoadedSolution {
     let solution = matchByHint(this.solutions, hint);
+    if (!solution && this.refusesOutsideRoots(hint)) throw new Error(`unknown solution: ${hint}`);
     if (!solution && hint.toLowerCase().endsWith(".json") && existsSync(hint)) solution = this.register(normalizePath(hint));
     if (!solution) throw new Error(`unknown solution: ${hint}`);
     const key = pathKey(solution.path);
@@ -262,6 +279,7 @@ export class WorkspaceManager {
       if (matchByHint(view.solutions, hint) === null) {
         const hidden = this.findRegistered(hint);
         if (hidden || !hint.toLowerCase().endsWith(".json") || !existsSync(hint)) throw new Error(`unknown solution: ${hint}`);
+        if (this.refusesOutsideRoots(hint)) throw new Error(`unknown solution: ${hint}`);
         const described = describeSolution(normalizePath(hint));
         if (!allows(described)) throw new Error(`unknown solution: ${hint}`);
         this.register(described);

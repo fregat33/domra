@@ -16,6 +16,7 @@ Later sources override earlier ones, per key:
 | Key | Type | Default | Environment variable |
 |---|---|---|---|
 | `roots` | `string[]` | `[]` | `DOMRA_ROOTS` |
+| `rootsOnly` | `boolean` | `false` | `DOMRA_ROOTS_ONLY` (`true` or `false`) |
 | `preload` | `string[]` | `[]` | `DOMRA_PRELOAD` |
 | `defaultSolution` | `string \| null` | `null` | `DOMRA_DEFAULT_SOLUTION` |
 | `port` | `number` | `5302` | `DOMRA_PORT` |
@@ -37,6 +38,7 @@ Later sources override earlier ones, per key:
 | `idleEvictionMinutes` | `number` | `0` | `DOMRA_IDLE_EVICTION_MINUTES` (`0` disables) |
 
 - `roots`: directories scanned for tsconfig solutions.
+- `rootsOnly`: when `true`, a request that would register a tsconfig by a full path under none of the roots (plain prefix test, no depth limit, no ignored folders) registers nothing. Tools with a `solution` argument, preload and `defaultSolution` treat it as an unknown solution; `load_solution` answers `Outside the roots: {path}. ...`. A solution that is already registered still loads wherever it lies.
 - `preload`: solution names or paths loaded at startup.
 - `defaultSolution`: solution used when a tool call does not name one.
 - `port`: HTTP port of the MCP endpoint.

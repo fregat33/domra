@@ -3,6 +3,8 @@ import { join } from "node:path";
 
 export type DomraConfig = {
   roots: string[];
+  /** When true, a tsconfig path under none of the roots is not registered. */
+  rootsOnly: boolean;
   preload: string[];
   defaultSolution: string | null;
   port: number;
@@ -27,6 +29,7 @@ export type DomraConfig = {
 
 export const DEFAULT_CONFIG: DomraConfig = {
   roots: [],
+  rootsOnly: false,
   preload: [],
   defaultSolution: null,
   port: 5302,
@@ -50,6 +53,7 @@ export const DEFAULT_CONFIG: DomraConfig = {
 
 const ENV_KEYS: Record<keyof DomraConfig, string> = {
   roots: "DOMRA_ROOTS",
+  rootsOnly: "DOMRA_ROOTS_ONLY",
   preload: "DOMRA_PRELOAD",
   defaultSolution: "DOMRA_DEFAULT_SOLUTION",
   port: "DOMRA_PORT",
@@ -113,6 +117,8 @@ function readEnv(env: Record<string, string | undefined>): Partial<DomraConfig> 
 
   const roots = get("roots");
   if (roots !== undefined) result.roots = parseList(ENV_KEYS.roots, roots);
+  const rootsOnly = get("rootsOnly");
+  if (rootsOnly !== undefined) result.rootsOnly = parseBoolean(ENV_KEYS.rootsOnly, rootsOnly);
   const preload = get("preload");
   if (preload !== undefined) result.preload = parseList(ENV_KEYS.preload, preload);
   const ignored = get("ignoredFolders");
