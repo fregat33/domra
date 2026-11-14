@@ -12,10 +12,13 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test \"test/**/*.test.ts\"",
-    "start": "node dist/server/index.js"
+    "start": "node dist/server/index.js",
+    "copy-runtime": "node scripts/copy-runtime.ts"
+  },
+  "dependencies": {
+    "typescript": "~6.0.3"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
-    "typescript": "~6.0.3"
+    "@types/node": "^24.0.0"
   }
 }

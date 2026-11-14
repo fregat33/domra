@@ -17,6 +17,10 @@ npm test
 npm start
 ```
 
+### Run from a copy
+
+`npm run copy-runtime -- <target folder>` builds the server and writes a runnable copy into the folder: `dist/`, `package.json` and `node_modules/typescript`. `dist/` is replaced; every other file of the folder is kept. Start it with `node <target>/dist/server/index.js` from any working directory: the server reads `domra.json` and `domra.local.json` from the directory it is started in, so one copy can serve several configurations. The target must be outside the package folder. The command copies only the direct `dependencies` of `package.json`; a dependency that has dependencies of its own is not handled.
+
 ## Connect from Claude Code
 
 Start the daemon (`npm run build && npm start`; it listens on `127.0.0.1:5302`, see [Configuration](docs/config.md)), then:

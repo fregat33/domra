@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- `npm run copy-runtime -- <folder>` writes a runnable copy of the server (`dist/`, `package.json`, `node_modules/typescript`) that starts with `node <folder>/dist/server/index.js` from any working directory.
 - A `Stalls:` line in `status` and a `WARN` log line when the event loop of the daemon was blocked for 3 s or more, with the tool calls and jobs that ran.
 - Separate log lines for the load time and the index time of each solution.
 

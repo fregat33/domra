@@ -1,6 +1,6 @@
 # Server (Live mode)
 
-`node dist/server/index.js` (`npm start`) loads the configuration (`docs/config.md`), starts an HTTP server on `127.0.0.1:{port}` and prints `domra listening on http://127.0.0.1:{port}/mcp` to stderr. `SIGINT`/`SIGTERM` close it. Entry: `src/server/index.ts`; embedding/tests: `startServer(options)` in `src/server/server.ts` returns `{ port, close(), manager, store, jobs }` (`port: 0` picks a free port).
+`node dist/server/index.js` (`npm start`) loads the configuration (`docs/config.md`), starts an HTTP server on `127.0.0.1:{port}` and prints `domra listening on http://127.0.0.1:{port}/mcp` to stderr. `SIGINT`/`SIGTERM` close it. Entry: `src/server/index.ts`; embedding/tests: `startServer(options)` in `src/server/server.ts` returns `{ port, close(), manager, store, jobs }` (`port: 0` picks a free port). To run the server from a copy outside the checkout, use `npm run copy-runtime -- <target folder>` (see the README).
 
 ## Startup
 
