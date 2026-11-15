@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 - 2026-11-15
 
 ### Added
 - Config key `rootsOnly` (`DOMRA_ROOTS_ONLY`, default `false`): when `true`, a tsconfig path outside every root is not registered, and `load_solution` answers `Outside the roots: ...`.
