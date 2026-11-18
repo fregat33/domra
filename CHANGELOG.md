@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2 - 2026-11-19
+
+### Changed
+- The dependency versions in `package.json` are exact (`typescript` 6.0.3, `@types/node` 24.19.2).
+
 ## 0.2.1 - 2026-11-15
 
 ### Added
